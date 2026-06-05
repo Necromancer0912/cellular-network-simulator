@@ -1,0 +1,35 @@
+# Build artifacts
+bin/
+obj/
+*.o
+*.d
+
+# IDE files
+.vscode/
+trash/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Core dumps
+core
+*.core
+
+# Compiler output
+*.out
+*.exe
+*.txt
+md_trash/
