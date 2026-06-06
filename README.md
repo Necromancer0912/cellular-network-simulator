@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <video src="live_demo.mp4" width="850" controls autoplay loop muted></video>
+  <video src="https://github.com/Necromancer0912/heterogeneous-cellular-network-simulator/raw/main/live_demo.mp4" width="850" controls autoplay loop muted></video>
 </p>
 
 ---
