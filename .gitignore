@@ -33,3 +33,6 @@ core
 *.exe
 *.txt
 md_trash/
+
+# Video files
+*.mov

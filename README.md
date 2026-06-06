@@ -12,6 +12,10 @@
   <strong>A Comprehensive Simulation Framework for 2G–7G Cellular Networks</strong>
 </p>
 
+<p align="center">
+  <video src="live_demo.mp4" width="850" controls autoplay loop muted></video>
+</p>
+
 ---
 
 <details>
