@@ -63,9 +63,12 @@ private:
   std::chrono::steady_clock::time_point startTime;
   int actionsSelectedIdx;  // For Actions tab keyboard navigation
   std::vector<ToastNotification> toasts;
-  int selectedMapType;     // 0: None, 1: Tower, 2: Device, 3: Core Router
+  // 0: None, 1: Tower, 3: Backhaul Hub. (2 was "Device" - the map no
+  // longer plots individual devices, see computeGridCoordinates in
+  // ConsoleTUI.cpp, so nothing sets selectedMapType to 2 anymore.)
+  int selectedMapType;
   int selectedMapId;       // Selected element index/ID
-  bool heatmapMode;        // Toggle RF signal heatmap mode
+  bool heatmapMode;        // Toggle signal coverage shading (on by default)
   bool packetFlowMode;     // Toggle live packet hop animations mode
   bool mapCursorMode;      // Toggle keyboard cursor mode for Visual Map
   int mapCursorRow;        // Keyboard cursor row
@@ -75,7 +78,6 @@ private:
   std::vector<std::vector<int>> towerThroughputHistory;
   std::vector<long long> lastTowerMessages;
   std::vector<std::pair<int, int>> towerGridCoords;
-  std::vector<std::pair<int, int>> deviceGridCoords;
   void computeGridCoordinates(int mapH, int mapW);
 
   // Terminal settings

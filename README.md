@@ -281,9 +281,22 @@ Launches automatically on `./bin/cellular_simulator` (no flags). Full-screen, mo
 | Towers | `2` | Tower list, per-core utilization bars |
 | Devices | `3` | Sortable, searchable (`/`) device table |
 | Analytics | `4` | Generation comparison bars, tower health monitor, network summary |
-| Visual Map | `5` | 2D spatial map (towers, devices, buildings, live packet animation) |
+| Visual Map | `5` | Network topology view: labeled towers colored by load, a labeled backhaul hub, buildings, a scale ruler, and a complete legend (see below) |
 | Actions | `6` | Keyboard/mouse-navigable action list |
 | Help | `7` | Hotkeys and console command reference |
+
+### The Visual Map redesign
+
+The Visual Map tab was rebuilt after direct feedback that the original version was not understandable: it plotted every individual device as an unlabeled dot on a 1000m x 1000m world with no axis or scale, a legend that didn't explain several of the symbols actually on screen (the `═` backhaul lines and packet icons had no entry at all), and a collision-avoidance algorithm that could silently displace an overlapping icon up to 30 grid cells from its true position with no indication that happened.
+
+The fix reframes the tab as a **network topology view** instead of a per-device scatter plot:
+
+- Towers are always labeled (`T0 6u 42%` - id, connected device count, utilization) and colored by load (green/yellow/red), never requiring a click to identify.
+- Individual devices are no longer plotted on the map at all - that's what the Devices tab's searchable/sortable table already does well. The map's job is towers, links, and terrain, not device-level scatter.
+- A scale ruler (`0m ... 1000m`) runs along the bottom so on-screen distance is interpretable.
+- The legend, moved into the Inspector panel where there's room for it, covers every glyph the tab can actually draw.
+- Signal coverage shading is on by default (previously an opt-in toggle a first-time user wouldn't know existed), so the default view reads as "a network" instead of mostly empty space.
+- Tower/hub labels are drawn as whole strings on top of the grid instead of character-by-character into individual cells, which is what let the old version silently truncate a label to a bare "T" when its cell happened to be occupied by something else.
 
 ### Console commands (press `:`)
 

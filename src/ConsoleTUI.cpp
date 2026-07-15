@@ -23,7 +23,7 @@ ConsoleTUI::ConsoleTUI(Simulator &sim)
     activeModal(ModalType::NONE), activeFieldIdx(0), lastProcessedMessages(0),
     frameCounter(0), startTime(std::chrono::steady_clock::now()), actionsSelectedIdx(0),
     selectedMapType(0), selectedMapId(-1),
-    heatmapMode(false), packetFlowMode(true),
+    heatmapMode(true), packetFlowMode(true),
     mapCursorMode(false), mapCursorRow(0), mapCursorCol(0) {
       // Pre-fill throughput history
       throughputHistory.assign(50, 0);
@@ -967,15 +967,13 @@ void ConsoleTUI::drawAnalyticsTab(int rows, int cols) {
 }
 
 void ConsoleTUI::computeGridCoordinates(int mapH, int mapW) {
-  int dev_count = simulator.get_device_count();
   int tower_count = simulator.get_tower_count();
-  
+
   towerGridCoords.assign(tower_count, {-1, -1});
-  deviceGridCoords.assign(dev_count, {-1, -1});
-  
+
   std::vector<std::vector<bool>> occupied(mapH, std::vector<bool>(mapW, false));
 
-  // Helper: map coordinate to grid
+  // Helper: map world meters (0-1000 on each axis) to a grid cell
   auto getGridCoords = [&](double x, double y, int &r, int &c) {
     r = (int)((y * mapH) / 1000.0);
     c = (int)((x * mapW) / 1000.0);
@@ -985,26 +983,34 @@ void ConsoleTUI::computeGridCoordinates(int mapH, int mapW) {
     if (c >= mapW) c = mapW - 1;
   };
 
-  // 1. Core Router occupied area (center of the map)
-  int core_r = mapH / 2;
-  int core_c = mapW / 2;
+  // 1. Reserve the backhaul hub's area at the center of the map
+  int hub_r = mapH / 2;
+  int hub_c = mapW / 2;
   for (int dr = -1; dr <= 1; dr++) {
     for (int dc = -1; dc <= 1; dc++) {
-      int nr = core_r + dr;
-      int nc = core_c + dc;
+      int nr = hub_r + dr;
+      int nc = hub_c + dc;
       if (nr >= 0 && nr < mapH && nc >= 0 && nc < mapW) {
         occupied[nr][nc] = true;
       }
     }
   }
 
-  // 2. Towers
+  // 2. Towers. This is a topology view (see drawMapTab): towers are the
+  // only elements that need a resolved, collision-free position. Devices
+  // are reported as a per-tower count/utilization badge instead of being
+  // individually plotted - an earlier version placed every single device
+  // on this same grid via the same spiral search below, which could shove
+  // an overlapping device up to 30 cells from its true position with no
+  // visual indication that happened, and produced a map that was mostly
+  // unlabeled scattered dots. Per-device detail lives in the Devices tab,
+  // which already does that job with a searchable/sortable table.
   for (int i = 0; i < tower_count; i++) {
     auto tw = simulator.get_tower(i);
     if (!tw) continue;
     int tr, tc;
     getGridCoords(tw->get_x(), tw->get_y(), tr, tc);
-    
+
     int dist = 0;
     bool placed = false;
     while (!placed && dist < 15) {
@@ -1023,7 +1029,7 @@ void ConsoleTUI::computeGridCoordinates(int mapH, int mapW) {
       if (dist == 0) dist = 1;
       else dist++;
     }
-    
+
     towerGridCoords[i] = {tr, tc};
     occupied[tr][tc] = true;
   }
@@ -1038,36 +1044,6 @@ void ConsoleTUI::computeGridCoordinates(int mapH, int mapW) {
       }
     }
   }
-
-  // 4. Devices
-  for (int i = 0; i < dev_count; i++) {
-    auto dev = simulator.get_device(i);
-    if (!dev) continue;
-    int dr, dc;
-    getGridCoords(dev->get_x(), dev->get_y(), dr, dc);
-    
-    int dist = 0;
-    bool placed = false;
-    while (!placed && dist < 30) {
-      for (int dr_offset = -dist; dr_offset <= dist && !placed; dr_offset++) {
-        for (int dc_offset = -dist; dc_offset <= dist && !placed; dc_offset++) {
-          if (abs(dr_offset) != dist && abs(dc_offset) != dist) continue;
-          int nr = dr + dr_offset;
-          int nc = dc + dc_offset;
-          if (nr >= 0 && nr < mapH && nc >= 0 && nc < mapW && !occupied[nr][nc]) {
-            dr = nr;
-            dc = nc;
-            placed = true;
-          }
-        }
-      }
-      if (dist == 0) dist = 1;
-      else dist++;
-    }
-    
-    deviceGridCoords[i] = {dr, dc};
-    occupied[dr][dc] = true;
-  }
 }
 
 void ConsoleTUI::drawMapTab(int rows, int cols) {
@@ -1079,122 +1055,112 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
   int mapW_box = cols * 2 / 3;
   int inspectW_box = cols - mapW_box - 1;
 
-  drawBox(contentStart, 0, boxHeight, mapW_box, "2D SPATIAL TOPOLOGY MAP");
-  drawBox(contentStart, mapW_box + 1, boxHeight, inspectW_box, "MAP INSPECTOR");
+  drawBox(contentStart, 0, boxHeight, mapW_box, "NETWORK TOPOLOGY");
+  drawBox(contentStart, mapW_box + 1, boxHeight, inspectW_box, "LEGEND & INSPECTOR");
 
-  int mapH = boxHeight - 3; // -2 for borders, -1 for legend at the bottom
-  int mapW = mapW_box - 4;  // -2 for borders, -2 for margin
+  // -1 border already handled by drawBox; reserve one row for the scale
+  // ruler and one for the mode/hint line at the bottom of the map box.
+  int mapH = boxHeight - 4;
+  int mapW = mapW_box - 4;
   if (mapH < 3 || mapW < 5) return;
-
-  // Legend and instructions
-  std::string legend;
-  if (mapCursorMode) {
-    legend = "Move: Arrows/WASD | [Enter/Space]: Toggle Bldg | [C] Exit Cursor Mode";
-  } else {
-    legend = "▲=Tower  ▣=Core  ●=Connected  x=Disconnected  █=Bldg  [C] Keyboard Mode";
-  }
-  int legendCol = (mapW_box - (int)legend.length()) / 2;
-  if (legendCol < 2) legendCol = 2;
-  printAt(contentStart + boxHeight - 2, legendCol, legend, TerminalColor::BOLD_YELLOW);
 
   int dev_count = simulator.get_device_count();
   int tower_count = simulator.get_tower_count();
 
-  // Compute resolved grid positions with collision resolution
+  // Compute resolved grid positions (towers + buildings only - see
+  // computeGridCoordinates for why devices are no longer plotted here).
   computeGridCoordinates(mapH, mapW);
 
-  // Create grid overlay
   struct GridCell {
     std::string ch;
     std::string fg;
-    bool has_element;
-    int type; // 0: empty/heatmap, 1: tower, 2: device, 3: core, 4: building
-    int id;   // element index
+    int type; // 0: empty/coverage shading, 1: tower, 3: hub, 4: building
   };
-  std::vector<std::vector<GridCell>> mapGrid(mapH, std::vector<GridCell>(mapW, {" ", "", false, 0, -1}));
+  std::vector<std::vector<GridCell>> mapGrid(mapH, std::vector<GridCell>(mapW, {" ", "", 0}));
 
-  // 1. Draw Heatmap (if enabled)
+  // 1. Signal coverage shading, on by default (see heatmapMode's
+  // initializer) so the map reads as "a network" at a glance instead of
+  // mostly empty space with a toggle a first-time user wouldn't know about.
   if (heatmapMode && tower_count > 0) {
     for (int r = 0; r < mapH; r++) {
       for (int c = 0; c < mapW; c++) {
-        // Map to meters
         double mx = (c * 1000.0) / mapW;
         double my = (r * 1000.0) / mapH;
-        
-        // Find nearest tower
+
         int nearestIdx = -1;
-        double minDist = 99999.0;
+        double minDist = 1e9;
         for (int t = 0; t < tower_count; t++) {
           auto tw = simulator.get_tower(t);
           if (tw) {
             double dx = mx - tw->get_x();
             double dy = my - tw->get_y();
-            double d = sqrt(dx*dx + dy*dy);
+            double d = sqrt(dx * dx + dy * dy);
             if (d < minDist) {
               minDist = d;
               nearestIdx = t;
             }
           }
         }
-        
+
         if (nearestIdx != -1) {
           auto tw = simulator.get_tower(nearestIdx);
           bool has_los = simulator.check_line_of_sight(mx, my, tw->get_x(), tw->get_y());
           double rssi = simulator.compute_rssi(minDist, !has_los);
-          
-          // Shading and colors based on signal strength
+
           if (rssi > -65.0) {
-            mapGrid[r][c] = {"▓", "\033[38;5;40m", false, 0, -1}; // Strong signal green
+            mapGrid[r][c] = {"▓", "\033[38;5;22m", 0}; // Strong signal, dim green
           } else if (rssi > -80.0) {
-            mapGrid[r][c] = {"▒", "\033[38;5;148m", false, 0, -1}; // Fair signal yellow-green
+            mapGrid[r][c] = {"▒", "\033[38;5;58m", 0}; // Fair signal, dim yellow-green
           } else if (rssi > -95.0) {
-            mapGrid[r][c] = {"░", "\033[38;5;214m", false, 0, -1}; // Weak signal orange
-          } else {
-            mapGrid[r][c] = {".", "\033[38;5;240m", false, 0, -1}; // Very weak signal dark gray
+            mapGrid[r][c] = {"░", "\033[38;5;236m", 0}; // Weak signal, dark gray
           }
+          // Weaker than that: leave blank rather than adding a 4th shade -
+          // the point is a coverage cue, not a precise RF survey.
         }
       }
     }
   }
 
-  // 2. Draw Buildings/Obstacles
+  // 2. Buildings/obstacles
   for (int r = 0; r < mapH; r++) {
     for (int c = 0; c < mapW; c++) {
       int gx = (c * 100) / mapW;
       int gy = (r * 100) / mapH;
       if (simulator.has_obstacle_at(gx, gy)) {
-        mapGrid[r][c] = {"█", "\033[38;5;244m", true, 4, -1}; // Gray block
+        mapGrid[r][c] = {"█", "\033[38;5;244m", 4};
       }
     }
   }
 
-  // 3. Draw Core Router (▣) at center of the grid map
-  int core_r = mapH / 2;
-  int core_c = mapW / 2;
-  bool is_core_selected = (selectedMapType == 3);
-  std::string core_color = is_core_selected ? "\033[1;37m\033[45m" : "\033[1;35m";
-  mapGrid[core_r][core_c] = {"▣", core_color, true, 3, 0};
+  // 3. Backhaul hub at the center of the map - all inter-tower traffic
+  // routes through this single shared point (simplified model, explained
+  // in the inspector panel below rather than left as an unlabeled glyph).
+  int hub_r = mapH / 2;
+  int hub_c = mapW / 2;
+  bool hub_selected = (selectedMapType == 3);
+  std::string hub_color = hub_selected ? "\033[1;37m\033[45m" : "\033[1;35m";
+  mapGrid[hub_r][hub_c] = {"◈", hub_color, 3}; // ◈
 
-  // 4. Draw Fiber Backhaul Lines (Towers to Core Router)
+  // 4. Backhaul links (tower <-> hub)
   for (int i = 0; i < tower_count; i++) {
-    if (i >= (int)towerGridCoords.size()) break;
+    if (i >= (int)towerGridCoords.size()) continue;
     int tr = towerGridCoords[i].first;
     int tc = towerGridCoords[i].second;
     if (tr == -1 || tc == -1) continue;
 
     bool highlight_backhaul = (selectedMapType == 3) || (selectedMapType == 1 && selectedMapId == i);
-    std::string line_fg = highlight_backhaul ? "\033[1;35m" : "\033[38;5;238m"; // Magenta / Dim Gray
+    std::string line_fg = highlight_backhaul ? "\033[1;35m" : "\033[38;5;238m";
 
     int r0 = tr, c0 = tc;
-    int r1 = core_r, c1 = core_c;
+    int r1 = hub_r, c1 = hub_c;
     int dr_diff = abs(r1 - r0), dc_diff = abs(c1 - c0);
     int sr = r0 < r1 ? 1 : -1, sc = c0 < c1 ? 1 : -1;
     int err = dr_diff - dc_diff;
 
     while (true) {
-      if ((r0 != tr || c0 != tc) && (r0 != core_r || c0 != core_c)) {
+      if ((r0 != tr || c0 != tc) && (r0 != hub_r || c0 != hub_c)) {
         if (mapGrid[r0][c0].type == 0) {
-          mapGrid[r0][c0] = {"═", line_fg, false, 0, -1};
+          mapGrid[r0][c0] = {"═", line_fg, 0};
         }
       }
       if (r0 == r1 && c0 == c1) break;
@@ -1204,170 +1170,71 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
     }
   }
 
-  // 5. Draw Towers (▲)
+  // 5. Towers, colored by utilization band so load is visible without a click
   for (int i = 0; i < tower_count; i++) {
-    if (i >= (int)towerGridCoords.size()) break;
+    if (i >= (int)towerGridCoords.size()) continue;
     int tr = towerGridCoords[i].first;
     int tc = towerGridCoords[i].second;
     if (tr == -1 || tc == -1) continue;
 
+    auto tw = simulator.get_tower(i);
+    double util = tw ? tw->get_utilization() : 0.0;
+    std::string band_color = util > 85.0 ? "\033[1;31m" : (util > 50.0 ? "\033[1;33m" : "\033[1;32m");
     bool is_selected = (selectedMapType == 1 && selectedMapId == i);
-    std::string tw_color = is_selected ? "\033[1;37m\033[46m" : "\033[1;36m"; // Highlighted Cyan / Cyan
-    mapGrid[tr][tc] = {"▲", tw_color, true, 1, i};
-
-    // Put tower label nearby if room
-    std::string label = "T" + std::to_string(i);
-    for (size_t l = 0; l < label.length(); l++) {
-      int lc = tc + 1 + l;
-      if (lc < mapW && mapGrid[tr][lc].type == 0) {
-        mapGrid[tr][lc] = {std::string(1, label[l]), is_selected ? "\033[1;36m" : "\033[38;5;246m", true, 0, -1};
-      }
-    }
+    std::string tw_color = is_selected ? "\033[1;37m\033[46m" : band_color;
+    mapGrid[tr][tc] = {"▲", tw_color, 1}; // ▲
   }
 
-  // 6. Draw Device-to-Tower Signal Paths (only for selected device or selected tower's devices)
-  for (int i = 0; i < dev_count; i++) {
-    auto dev = simulator.get_device(i);
-    if (!dev) continue;
-    bool is_conn = dev->get_connection_status();
-    if (!is_conn) continue;
-
-    int tw_idx = -1;
-    for (int t = 0; t < tower_count; t++) {
-      auto tw = simulator.get_tower(t);
-      if (tw && tw->get_device(dev->get_device_id()) != nullptr) {
-        tw_idx = t;
-        break;
-      }
-    }
-    if (tw_idx == -1) continue;
-
-    bool draw_path = false;
-    if (selectedMapType == 2 && selectedMapId == i) {
-      draw_path = true; // Selected device
-    } else if (selectedMapType == 1 && selectedMapId == tw_idx) {
-      draw_path = true; // Devices connected to selected tower
-    }
-
-    if (draw_path && packetFlowMode) {
-      if (i >= (int)deviceGridCoords.size() || tw_idx >= (int)towerGridCoords.size()) continue;
-      int dr = deviceGridCoords[i].first;
-      int dc = deviceGridCoords[i].second;
-      int tr = towerGridCoords[tw_idx].first;
-      int tc = towerGridCoords[tw_idx].second;
-      if (dr == -1 || dc == -1 || tr == -1 || tc == -1) continue;
-
-      int r0 = dr, c0 = dc;
-      int r1 = tr, c1 = tc;
-      int dr_diff = abs(r1 - r0), dc_diff = abs(c1 - c0);
-      int sr = r0 < r1 ? 1 : -1, sc = c0 < c1 ? 1 : -1;
-      int err = dr_diff - dc_diff;
-
-      while (true) {
-        if ((r0 != dr || c0 != dc) && (r0 != tr || c0 != tc)) {
-          if (mapGrid[r0][c0].type == 0) {
-            mapGrid[r0][c0] = {"·", "\033[38;5;236m", false, 0, -1}; // Subtle signal dots
-          }
-        }
-        if (r0 == r1 && c0 == c1) break;
-        int e2 = 2 * err;
-        if (e2 > -dc_diff) { err -= dc_diff; r0 += sr; }
-        if (e2 < dr_diff) { err += dr_diff; c0 += sc; }
-      }
-    }
-  }
-
-  // 7. Draw Live Packets from active packet list
+  // 6. Live packets, tower-to-hub-to-tower hops only. Devices no longer
+  // have a plotted map position, so a packet's device-to-tower leg (hop 0)
+  // and tower-to-device leg (hop 3) aren't animated here - only the
+  // inter-tower hub hops are, which is where this map's topology-level
+  // detail actually lives.
   if (packetFlowMode) {
     const auto &active_pkts = simulator.get_active_packets();
     for (const auto &pkt : active_pkts) {
+      if (pkt.current_hop != 1 && pkt.current_hop != 2) continue;
+
       int g_r0 = -1, g_c0 = -1, g_r1 = -1, g_c1 = -1;
-      
-      if (pkt.current_hop == 0) {
-        // Dev -> SrcTower
-        if (pkt.source_id >= 0 && pkt.source_id < (int)deviceGridCoords.size()) {
-          g_r0 = deviceGridCoords[pkt.source_id].first;
-          g_c0 = deviceGridCoords[pkt.source_id].second;
-        }
-        if (pkt.src_tower_idx >= 0 && pkt.src_tower_idx < (int)towerGridCoords.size()) {
-          g_r1 = towerGridCoords[pkt.src_tower_idx].first;
-          g_c1 = towerGridCoords[pkt.src_tower_idx].second;
-        }
-      } else if (pkt.current_hop == 1) {
-        // SrcTower -> Core Router
+      if (pkt.current_hop == 1) {
         if (pkt.src_tower_idx >= 0 && pkt.src_tower_idx < (int)towerGridCoords.size()) {
           g_r0 = towerGridCoords[pkt.src_tower_idx].first;
           g_c0 = towerGridCoords[pkt.src_tower_idx].second;
         }
-        g_r1 = core_r;
-        g_c1 = core_c;
-      } else if (pkt.current_hop == 2) {
-        // Core Router -> DstTower
-        g_r0 = core_r;
-        g_c0 = core_c;
+        g_r1 = hub_r;
+        g_c1 = hub_c;
+      } else {
+        g_r0 = hub_r;
+        g_c0 = hub_c;
         if (pkt.dst_tower_idx >= 0 && pkt.dst_tower_idx < (int)towerGridCoords.size()) {
           g_r1 = towerGridCoords[pkt.dst_tower_idx].first;
           g_c1 = towerGridCoords[pkt.dst_tower_idx].second;
-        }
-      } else if (pkt.current_hop == 3) {
-        // DstTower -> DstDev
-        if (pkt.dst_tower_idx >= 0 && pkt.dst_tower_idx < (int)towerGridCoords.size()) {
-          g_r0 = towerGridCoords[pkt.dst_tower_idx].first;
-          g_c0 = towerGridCoords[pkt.dst_tower_idx].second;
-        }
-        if (pkt.dest_id >= 0 && pkt.dest_id < (int)deviceGridCoords.size()) {
-          g_r1 = deviceGridCoords[pkt.dest_id].first;
-          g_c1 = deviceGridCoords[pkt.dest_id].second;
         }
       }
 
       if (g_r0 != -1 && g_c0 != -1 && g_r1 != -1 && g_c1 != -1) {
         int pr = (int)(g_r0 + (g_r1 - g_r0) * pkt.progress);
         int pc = (int)(g_c0 + (g_c1 - g_c0) * pkt.progress);
-
-        if (pr >= 0 && pr < mapH && pc >= 0 && pc < mapW) {
-          std::string pkt_icon = (pkt.type == "VOICE") ? "o" : "◆";
-          std::string pkt_color = (pkt.type == "VOICE") ? "\033[1;33m" : "\033[1;36m"; // Bold Yellow / Bold Cyan
-          
-          if (mapGrid[pr][pc].type == 0) {
-            mapGrid[pr][pc] = {pkt_icon, pkt_color, false, 0, -1};
-          }
+        if (pr >= 0 && pr < mapH && pc >= 0 && pc < mapW && mapGrid[pr][pc].type == 0) {
+          std::string pkt_icon = (pkt.type == "VOICE") ? "o" : "◆"; // ◆
+          std::string pkt_color = (pkt.type == "VOICE") ? "\033[1;33m" : "\033[1;36m";
+          mapGrid[pr][pc] = {pkt_icon, pkt_color, 0};
         }
       }
     }
   }
 
-  // 8. Draw Devices (●/x)
-  for (int i = 0; i < dev_count; i++) {
-    if (i >= (int)deviceGridCoords.size()) break;
-    int dr = deviceGridCoords[i].first;
-    int dc = deviceGridCoords[i].second;
-    if (dr == -1 || dc == -1) continue;
-
-    auto dev = simulator.get_device(i);
-    if (!dev) continue;
-
-    bool is_selected = (selectedMapType == 2 && selectedMapId == i);
-    bool is_conn = dev->get_connection_status();
-    std::string dev_color = is_selected ? "\033[1;30m\033[42m" : (is_conn ? "\033[1;32m" : "\033[1;31m"); // Green / Red
-
-    mapGrid[dr][dc] = {is_conn ? "●" : "x", dev_color, true, 2, i};
+  // 7. Keyboard cursor
+  if (mapCursorMode && mapCursorRow >= 0 && mapCursorRow < mapH && mapCursorCol >= 0 && mapCursorCol < mapW) {
+    mapGrid[mapCursorRow][mapCursorCol].ch = "┼"; // ┼
+    mapGrid[mapCursorRow][mapCursorCol].fg = "\033[1;33;5m";
   }
 
-  // 9. Draw Map Cursor (┼) if active
-  if (mapCursorMode) {
-    if (mapCursorRow >= 0 && mapCursorRow < mapH && mapCursorCol >= 0 && mapCursorCol < mapW) {
-      auto &cell = mapGrid[mapCursorRow][mapCursorCol];
-      cell.ch = "┼";
-      cell.fg = "\033[1;33;5m"; // Bright blinking yellow cursor
-    }
-  }
-
-  // Render composite map row by row
+  // Render the grid
   for (int r = 0; r < mapH; ++r) {
-    std::string line = "";
+    std::string line;
     for (int c = 0; c < mapW; ++c) {
-      auto cell = mapGrid[r][c];
+      auto &cell = mapGrid[r][c];
       if (cell.fg.empty()) {
         line += cell.ch;
       } else {
@@ -1377,9 +1244,66 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
     printAt(contentStart + 1 + r, 2, line);
   }
 
-  // Draw Map Inspector (Right Panel)
-  int ic = mapW_box + 3; // Inspector content column
-  int ir = contentStart + 1; // Inspector content row start
+  // Tower + hub labels, drawn as whole strings on top of the grid instead
+  // of character-by-character into individual cells. The previous version
+  // wrote labels one character at a time and silently skipped any
+  // character whose cell was already occupied by something else, which
+  // could leave a tower showing only "T" or a bare digit with no
+  // indication anything was cut off. This always renders the full label.
+  for (int i = 0; i < tower_count; i++) {
+    if (i >= (int)towerGridCoords.size()) continue;
+    int tr = towerGridCoords[i].first;
+    int tc = towerGridCoords[i].second;
+    if (tr == -1 || tc == -1) continue;
+    auto tw = simulator.get_tower(i);
+    if (!tw) continue;
+
+    bool is_selected = (selectedMapType == 1 && selectedMapId == i);
+    std::string label = "T" + std::to_string(i) + " " + std::to_string(tw->get_current_device_count()) +
+                        "u " + std::to_string((int)tw->get_utilization()) + "%";
+    int lc = tc + 2;
+    if (lc + (int)label.length() > mapW) lc = tc - (int)label.length() - 1;
+    if (lc < 0) lc = 0;
+    printAt(contentStart + 1 + tr, 2 + lc, label, is_selected ? TerminalColor::BOLD_WHITE : TerminalColor::BOLD_CYAN);
+  }
+  {
+    std::string hubLabel = "HUB";
+    int lc = hub_c + 2;
+    if (lc + (int)hubLabel.length() > mapW) lc = hub_c - (int)hubLabel.length() - 1;
+    if (lc < 0) lc = 0;
+    printAt(contentStart + 1 + hub_r, 2 + lc, hubLabel, TerminalColor::BOLD_MAGENTA);
+  }
+
+  // Scale ruler along the bottom of the map interior, so on-screen distance
+  // is interpretable instead of an unlabeled 1000m x 1000m world plotted
+  // onto a character grid with no reference at all.
+  {
+    int rulerRow = contentStart + 1 + mapH;
+    std::string ruler(mapW, ' ');
+    std::vector<std::pair<int, std::string>> ticks = {
+      {0, "0m"}, {mapW / 4, "250m"}, {mapW / 2, "500m"}, {3 * mapW / 4, "750m"}, {std::max(0, mapW - 5), "1000m"}
+    };
+    for (auto &t : ticks) {
+      for (size_t k = 0; k < t.second.length() && t.first + (int)k < mapW; k++) {
+        ruler[t.first + k] = t.second[k];
+      }
+    }
+    printAt(rulerRow, 2, ruler, TerminalColor::CYAN);
+  }
+
+  // Mode/hint line at the very bottom of the map box
+  {
+    std::string hint = mapCursorMode
+      ? "Move: Arrows/WASD | [Enter/Space] Toggle building | [C] Exit cursor mode"
+      : "Click a tower or the hub to inspect it | [C] Keyboard cursor | [H] Coverage | [P] Packets";
+    int hintCol = (mapW_box - (int)hint.length()) / 2;
+    if (hintCol < 2) hintCol = 2;
+    printAt(contentStart + boxHeight - 2, hintCol, hint, TerminalColor::BOLD_YELLOW);
+  }
+
+  // ---- Legend & Inspector panel ----
+  int ic = mapW_box + 3;
+  int ir = contentStart + 1;
   int innerInspectW = inspectW_box - 4;
 
   auto printInspect = [&](const std::string &label, const std::string &value, const std::string &color = TerminalColor::WHITE) {
@@ -1390,19 +1314,28 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
     printAt(ir++, ic, line + repeatChar(' ', pad), color);
   };
 
+  // Always-visible, complete legend - every glyph this tab can draw has an
+  // entry here, not just the ones that fit on a single line under the map.
+  printAt(ir++, ic, "LEGEND", TerminalColor::BOLD_YELLOW);
+  printAt(ir++, ic, "▲ Tower (green/yellow/red", TerminalColor::WHITE);
+  printAt(ir++, ic, "  = low/medium/high load)", TerminalColor::WHITE);
+  printAt(ir++, ic, "◈ Backhaul hub   ═ Link", TerminalColor::WHITE);
+  printAt(ir++, ic, "█ Building  ▓▒░ Coverage", TerminalColor::WHITE);
+  printAt(ir++, ic, "◆ Data packet  o Voice packet", TerminalColor::WHITE);
+  ir++;
+
   if (selectedMapType == 0) {
-    // General Stats & Routing Dashboard
     printInspect("STATUS: ", "General Summary", TerminalColor::BOLD_YELLOW);
     ir++;
     printInspect("Towers:       ", std::to_string(tower_count), TerminalColor::BOLD_CYAN);
-    
+
     int connected = 0;
     for (int i = 0; i < dev_count; ++i) {
       auto d = simulator.get_device(i);
       if (d && d->get_connection_status()) connected++;
     }
     printInspect("Devices:      ", std::to_string(connected) + " / " + std::to_string(dev_count), TerminalColor::BOLD_GREEN);
-    
+
     double avg_util = 0.0;
     int active_t = 0;
     for (int i = 0; i < tower_count; ++i) {
@@ -1416,34 +1349,25 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
     printInspect("Avg Util:     ", std::to_string((int)avg_util) + "%");
     ir++;
 
-    printInspect("Packet Routing Engine:", "", TerminalColor::BOLD_MAGENTA);
-    printInspect("Routed Pkts:  ", std::to_string(simulator.get_total_packets_routed()), TerminalColor::BOLD_CYAN);
-    printInspect("Processed:    ", std::to_string(simulator.get_processed_packets()), TerminalColor::BOLD_GREEN);
-    printInspect("Dropped Pkts: ", std::to_string(simulator.get_dropped_packets()), TerminalColor::BOLD_RED);
-    
-    // Router Queue Congestion progress bar
-    int active_pkts_cnt = simulator.get_active_packets().size();
-    double congestion = (active_pkts_cnt / 30.0) * 100.0;
-    if (congestion > 100.0) congestion = 100.0;
-    printInspect("Congestion:   ", std::to_string((int)congestion) + "%");
-    
-    int cBarW = std::min(15, innerInspectW - 13);
-    if (cBarW > 4) {
-      std::string cBar = OutputFormatter::get_progress_bar(congestion / 100.0, cBarW);
-      printAt(ir++, ic, "             " + cBar);
-    }
+    printInspect("Backhaul Hub:", "", TerminalColor::BOLD_MAGENTA);
+    printInspect("  All tower-to-tower traffic", "", TerminalColor::WHITE);
+    printInspect("  routes through this shared", "", TerminalColor::WHITE);
+    printInspect("  hub (simplified model).", "", TerminalColor::WHITE);
+    printInspect("  Routed:  ", std::to_string(simulator.get_total_packets_routed()), TerminalColor::BOLD_CYAN);
+    printInspect("  Dropped: ", std::to_string(simulator.get_dropped_packets()), TerminalColor::BOLD_RED);
     ir++;
 
-    printInspect("Console Controls:", "", TerminalColor::BOLD_YELLOW);
-    printInspect("  [H] Heatmap overlay: ", heatmapMode ? "ON" : "OFF", heatmapMode ? TerminalColor::BOLD_GREEN : TerminalColor::WHITE);
-    printInspect("  [P] Packet flows:    ", packetFlowMode ? "ON" : "OFF", packetFlowMode ? TerminalColor::BOLD_GREEN : TerminalColor::WHITE);
+    printInspect("Controls:", "", TerminalColor::BOLD_YELLOW);
+    printInspect("  [H] Coverage shading: ", heatmapMode ? "ON" : "OFF", heatmapMode ? TerminalColor::BOLD_GREEN : TerminalColor::WHITE);
+    printInspect("  [P] Packet animation: ", packetFlowMode ? "ON" : "OFF", packetFlowMode ? TerminalColor::BOLD_GREEN : TerminalColor::WHITE);
+    printInspect("  [C] Keyboard cursor", "", TerminalColor::WHITE);
     ir++;
-    
-    // Interactive mouse tip
-    printAt(ir++, ic, "Interactive Tip:", TerminalColor::BOLD_YELLOW);
-    printAt(ir++, ic, "Click map coordinates with", TerminalColor::WHITE);
-    printAt(ir++, ic, "your mouse to draw/erase", TerminalColor::WHITE);
-    printAt(ir++, ic, "concrete buildings!", TerminalColor::WHITE);
+
+    printAt(ir++, ic, "Click a tower or the hub to", TerminalColor::WHITE);
+    printAt(ir++, ic, "inspect it. Click empty space", TerminalColor::WHITE);
+    printAt(ir++, ic, "to draw/erase a building.", TerminalColor::WHITE);
+    printAt(ir++, ic, "For individual devices, see", TerminalColor::WHITE);
+    printAt(ir++, ic, "the Devices tab (key 3).", TerminalColor::WHITE);
   }
   else if (selectedMapType == 1) {
     // Tower Inspector
@@ -1460,7 +1384,7 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
     printInspect("Bandwidth:   ", std::to_string((int)tw->get_total_bandwidth()) + " MHz");
     printInspect("Devices:     ", std::to_string(tw->get_current_device_count()) + " / " + std::to_string(tw->get_max_supported_devices()));
     printInspect("Utilization: ", std::to_string((int)tw->get_utilization()) + "%");
-    
+
     int progW = std::min(20, innerInspectW - 13);
     if (progW > 4) {
       std::string bar = OutputFormatter::get_progress_bar(tw->get_utilization() / 100.0, progW);
@@ -1487,79 +1411,27 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
       }
     }
   }
-  else if (selectedMapType == 2) {
-    // Device Inspector
-    auto dev = simulator.get_device(selectedMapId);
-    if (!dev) {
-      selectedMapType = 0;
-      selectedMapId = -1;
-      return;
-    }
-    printInspect("INSPECTING:  ", dev->get_device_name(), TerminalColor::BOLD_GREEN);
+  else if (selectedMapType == 3) {
+    // Backhaul Hub Inspector
+    printInspect("INSPECTING:  ", "Backhaul Hub", TerminalColor::BOLD_MAGENTA);
     ir++;
-    printInspect("Generation:  ", dev->get_device_type(), TerminalColor::BOLD_YELLOW);
-    printInspect("Position:    ", "(" + std::to_string((int)dev->get_x()) + "," + std::to_string((int)dev->get_y()) + ")");
-    printInspect("Comm Type:   ", dev->get_communication_type_string());
-    
-    bool is_conn = dev->get_connection_status();
-    std::string statusStr = is_conn ? (std::string(TerminalColor::BOLD_GREEN) + "Connected" + TerminalColor::RESET) 
-                                    : (std::string(TerminalColor::BOLD_RED) + "Disconnected" + TerminalColor::RESET);
-    printInspect("Status:      ", statusStr);
-    printInspect("Total Msg:   ", std::to_string(dev->get_message_count()));
-
-    if (is_conn) {
-      int tw_idx = -1;
-      for (int t = 0; t < tower_count; ++t) {
-        auto tw = simulator.get_tower(t);
-        if (tw && tw->get_device(dev->get_device_id()) != nullptr) {
-          tw_idx = t;
-          break;
-        }
-      }
-      if (tw_idx != -1) {
-        auto tw = simulator.get_tower(tw_idx);
-        double dx = dev->get_x() - tw->get_x();
-        double dy = dev->get_y() - tw->get_y();
-        double dist = sqrt(dx*dx + dy*dy);
-        
-        bool has_los = simulator.check_line_of_sight(dev->get_x(), dev->get_y(), tw->get_x(), tw->get_y());
-        double rssi = simulator.compute_rssi(dist, !has_los);
-
-        printInspect("Connected To:", "Tower #" + std::to_string(tw_idx), TerminalColor::BOLD_CYAN);
-        printInspect("Distance:    ", std::to_string((int)dist) + " meters");
-        printInspect("RSSI Signal: ", std::to_string((int)rssi) + " dBm", (rssi > -75.0) ? TerminalColor::BOLD_GREEN : ((rssi > -95.0) ? TerminalColor::BOLD_YELLOW : TerminalColor::BOLD_RED));
-        
-        int sBarW = std::min(15, innerInspectW - 13);
-        if (sBarW > 4) {
-          // Normalize signal: -50 dBm = 100%, -115 dBm = 0%
-          double signal_pct = (rssi + 115.0) / 65.0;
-          if (signal_pct < 0.0) signal_pct = 0.0;
-          if (signal_pct > 1.0) signal_pct = 1.0;
-          std::string sigBar = OutputFormatter::get_progress_bar(signal_pct, sBarW);
-          printAt(ir++, ic, "             " + sigBar);
-        }
-      }
-    }
-  } else if (selectedMapType == 3) {
-    // Core Router Inspector
-    printInspect("INSPECTING:  ", "Core Router", TerminalColor::BOLD_MAGENTA);
-    ir++;
-    printInspect("Location:    ", "Central Hub (500,500)");
-    printInspect("Capacity:    ", "30 Packets Max");
+    printInspect("Role:        ", "Shared routing point");
+    printInspect("Location:    ", "Center (500,500)");
+    printInspect("Capacity:    ", "30 packets in flight");
     printInspect("Active Pkts: ", std::to_string(simulator.get_active_packets().size()), TerminalColor::BOLD_CYAN);
-    
+
     int active_pkts_cnt = simulator.get_active_packets().size();
     double congestion = (active_pkts_cnt / 30.0) * 100.0;
     if (congestion > 100.0) congestion = 100.0;
     printInspect("Congestion:  ", std::to_string((int)congestion) + "%", (congestion > 80.0) ? TerminalColor::BOLD_RED : ((congestion > 40.0) ? TerminalColor::BOLD_YELLOW : TerminalColor::BOLD_GREEN));
-    
+
     int cBarW = std::min(15, innerInspectW - 13);
     if (cBarW > 4) {
       std::string cBar = OutputFormatter::get_progress_bar(congestion / 100.0, cBarW);
       printAt(ir++, ic, "             " + cBar);
     }
     ir++;
-    
+
     printInspect("Throughput stats:", "", TerminalColor::BOLD_YELLOW);
     printInspect("  Total Routed:", std::to_string(simulator.get_total_packets_routed()));
     printInspect("  Processed:   ", std::to_string(simulator.get_processed_packets()), TerminalColor::BOLD_GREEN);
@@ -1895,7 +1767,7 @@ void ConsoleTUI::handleInput(int key) {
     int contentStart = 1;
     int contentEnd = rows_sz - 4;
     int boxHeight = contentEnd - contentStart;
-    int mapH = boxHeight - 3;
+    int mapH = boxHeight - 4;
     int mapW = (cols_sz * 2 / 3) - 4;
 
     if (key == 1001 || key == 'k' || key == 'K' || key == 'w' || key == 'W') { // Up
@@ -1929,23 +1801,22 @@ void ConsoleTUI::handleInput(int key) {
     if (key == 10 || key == 13 || key == ' ') { // Enter / Space
       int clicked_r = mapCursorRow;
       int clicked_c = mapCursorCol;
-      int dev_count = simulator.get_device_count();
       int tower_count = simulator.get_tower_count();
-      
+
       // Ensure coordinate cache is populated
-      if (towerGridCoords.empty() || deviceGridCoords.empty()) {
+      if (towerGridCoords.empty()) {
         computeGridCoordinates(mapH, mapW);
       }
 
       bool found = false;
 
-      // 1. Core Router (▣)
-      int core_r = mapH / 2;
-      int core_c = mapW / 2;
-      if (abs(clicked_r - core_r) <= 1 && abs(clicked_c - core_c) <= 1) {
+      // 1. Backhaul Hub (◈)
+      int hub_r = mapH / 2;
+      int hub_c = mapW / 2;
+      if (abs(clicked_r - hub_r) <= 1 && abs(clicked_c - hub_c) <= 1) {
         selectedMapType = 3;
         selectedMapId = 0;
-        addToast("Inspecting Central Core Backhaul Router", TerminalColor::BOLD_MAGENTA);
+        addToast("Inspecting Backhaul Hub", TerminalColor::BOLD_MAGENTA);
         found = true;
       }
 
@@ -1966,25 +1837,7 @@ void ConsoleTUI::handleInput(int key) {
         }
       }
 
-      // 3. Devices (●)
-      if (!found) {
-        for (int i = 0; i < dev_count; i++) {
-          if (i >= (int)deviceGridCoords.size()) break;
-          int dr = deviceGridCoords[i].first;
-          int dc = deviceGridCoords[i].second;
-          if (dr == -1 || dc == -1) continue;
-          if (abs(clicked_r - dr) <= 1 && abs(clicked_c - dc) <= 1) {
-            selectedMapType = 2;
-            selectedMapId = i;
-            auto dev = simulator.get_device(i);
-            addToast("Inspecting Device: " + (dev ? dev->get_device_name() : "UE"), TerminalColor::BOLD_GREEN);
-            found = true;
-            break;
-          }
-        }
-      }
-
-      // 4. Click empty/obstacle space -> toggle obstacle!
+      // 3. Click empty/obstacle space -> toggle obstacle!
       if (!found) {
         int gx = (clicked_c * 100) / mapW;
         int gy = (clicked_r * 100) / mapH;
@@ -2031,7 +1884,7 @@ void ConsoleTUI::handleInput(int key) {
       int contentStart = 1;
       int contentEnd = rows_sz - 4;
       int boxHeight = contentEnd - contentStart;
-      int mapH = boxHeight - 3;
+      int mapH = boxHeight - 4;
       int mapW = (cols_sz * 2 / 3) - 4;
       mapCursorRow = mapH / 2;
       mapCursorCol = mapW / 2;
@@ -2374,13 +2227,12 @@ void ConsoleTUI::handleMouseEvent(int button, int col, int row, bool is_press) {
     if (boxHeight < 5) boxHeight = 5;
 
     int mapW_box = cols * 2 / 3;
-    int mapH = boxHeight - 3;
+    int mapH = boxHeight - 4;
     int mapW = mapW_box - 4;
 
     int mapStartRow = contentStart + 1; // Fixed off-by-one row alignment
     int mapStartCol = 2;
 
-    int dev_count = simulator.get_device_count();
     int tower_count = simulator.get_tower_count();
 
     if (row >= mapStartRow && row < mapStartRow + mapH &&
@@ -2389,23 +2241,23 @@ void ConsoleTUI::handleMouseEvent(int button, int col, int row, bool is_press) {
       int clicked_c = col - mapStartCol;
 
       // Ensure coordinate cache is populated
-      if (towerGridCoords.empty() || deviceGridCoords.empty()) {
+      if (towerGridCoords.empty()) {
         computeGridCoordinates(mapH, mapW);
       }
 
       bool found = false;
 
-      // 1. Core Router Click check (▣)
-      int core_r = mapH / 2;
-      int core_c = mapW / 2;
-      if (abs(clicked_r - core_r) <= 1 && abs(clicked_c - core_c) <= 1) {
-        selectedMapType = 3; // Core Router
+      // 1. Backhaul Hub click check (◈)
+      int hub_r = mapH / 2;
+      int hub_c = mapW / 2;
+      if (abs(clicked_r - hub_r) <= 1 && abs(clicked_c - hub_c) <= 1) {
+        selectedMapType = 3; // Backhaul Hub
         selectedMapId = 0;
         found = true;
-        addToast("Inspecting Central Core Backhaul Router", TerminalColor::BOLD_MAGENTA);
+        addToast("Inspecting Backhaul Hub", TerminalColor::BOLD_MAGENTA);
       }
 
-      // 2. Towers Click check (▲)
+      // 2. Towers click check (▲)
       if (!found) {
         for (int i = 0; i < tower_count; i++) {
           if (i >= (int)towerGridCoords.size()) break;
@@ -2422,25 +2274,7 @@ void ConsoleTUI::handleMouseEvent(int button, int col, int row, bool is_press) {
         }
       }
 
-      // 3. Devices Click check (●/x)
-      if (!found) {
-        for (int i = 0; i < dev_count; i++) {
-          if (i >= (int)deviceGridCoords.size()) break;
-          int dr = deviceGridCoords[i].first;
-          int dc = deviceGridCoords[i].second;
-          if (dr == -1 || dc == -1) continue;
-          if (abs(clicked_r - dr) <= 1 && abs(clicked_c - dc) <= 1) {
-            selectedMapType = 2; // Device
-            selectedMapId = i;
-            auto dev = simulator.get_device(i);
-            addToast("Inspecting Device: " + (dev ? dev->get_device_name() : "UE"), TerminalColor::BOLD_GREEN);
-            found = true;
-            break;
-          }
-        }
-      }
-
-      // 4. Click on empty space clears selection (no more accidental building placements!)
+      // 3. Click on empty space clears selection (no more accidental building placements!)
       if (!found) {
         selectedMapType = 0;
         selectedMapId = -1;
