@@ -21,24 +21,21 @@ int main() {
     try {
         std::cout << "Running exception tests...\n";
 
-        // Test: CapacityException when message counter overflows
-        MassiveMIMOProtocol m5;
-        int messages_per_user = m5.calculate_messages_per_user();
-        // Use a core and directly call generate_messages with a huge value to attempt overflow
+        // Test: CellularCore's message counter accumulates correctly across
+        // calls. generate_messages() takes an int, so a single call can add
+        // at most ~2.1 billion messages; reaching the LLONG_MAX overflow
+        // guard in CellularCore::generate_messages would take billions of
+        // calls and isn't practical to exercise here. What we can actually
+        // verify is that repeated additions land on the exact expected
+        // total, with no silent truncation or drift.
         std::shared_ptr<Protocol> proto = std::make_shared<MassiveMIMOProtocol>();
         CellularCore core(proto);
         core.calculate_max_devices(1.0);
-        bool overflowCaught = false;
-        try {
-            // push the internal counter close to LLONG_MAX by generating large messages
-            core.generate_messages(100);
-            // simulate near-max by manually setting internal via multiple large adds - but we cannot access private
-            // So we just test that generate_messages with a negative or extremely large parameter is handled
-            core.generate_messages(0); // harmless
-        } catch (const CapacityException &e) {
-            overflowCaught = true;
-            std::cout << "Overflow caught: " << e.what() << "\n";
-        }
+        core.generate_messages(100);
+        core.generate_messages(1000000000); // 1e9, near the int range but far from LLONG_MAX
+        long long afterAccumulate = core.get_total_messages_generated();
+        assert(afterAccumulate == 100LL + 1000000000LL);
+        std::cout << "Message counter accumulated correctly: " << afterAccumulate << "\n";
 
         // Test: register_device throws when capacity reached
         TDMAProtocol tdma;
@@ -62,7 +59,8 @@ int main() {
             std::cout << "Capacity exception thrown as expected when overfilling core: " << e.what() << "\n";
         }
 
-        std::cout << "Exception tests completed (overflowCaught=" << overflowCaught << ", capacityThrew=" << capacityThrew << ")\n";
+        assert(capacityThrew);
+        std::cout << "Exception tests completed (capacityThrew=" << capacityThrew << ")\n";
         return 0;
     } catch (const std::exception &e) {
         std::cerr << "Test harness exception: " << e.what() << "\n";

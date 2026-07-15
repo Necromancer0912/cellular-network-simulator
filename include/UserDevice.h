@@ -1,6 +1,7 @@
 #ifndef USERDEVICE_H
 #define USERDEVICE_H
 
+#include <atomic>
 #include <string>
 #include <memory>
 
@@ -21,7 +22,11 @@ enum class CommunicationType
 class UserDevice
 {
 private:
-    static int device_counter;
+    // Devices are created from multiple threads at once when the simulator
+    // populates a network in parallel (Simulator::generate_network_parallel,
+    // connect_devices_async, run_threading_benchmark). A plain int counter
+    // is a data race under concurrent construction, so this is atomic.
+    static std::atomic<int> device_counter;
     int device_id;
     std::string device_name;
     CommunicationType comm_type;

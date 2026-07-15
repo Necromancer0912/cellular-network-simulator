@@ -88,6 +88,12 @@ private:
     Simulator *simulator;
     std::map<int, QoSLevel> device_qos;
 
+    // Falls back to a QoS level inferred from the device's communication
+    // type when nothing was explicitly set via set_device_qos(): voice
+    // traffic is latency-sensitive (HIGH), mixed traffic is MEDIUM, and
+    // data-only traffic can tolerate more delay (LOW).
+    QoSLevel effective_qos(const std::shared_ptr<UserDevice> &device) const;
+
 public:
     LoadBalancer(Simulator *sim);
     ~LoadBalancer();

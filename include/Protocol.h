@@ -35,6 +35,17 @@ public:
 
     // Common utility
     int calculate_total_channels(double total_bandwidth_mhz) const;
+
+protected:
+    // Shared by every calculate_required_cores() override: total message
+    // volume (with per-100-message overhead applied) divided by how many
+    // messages one core can process, rounded up. The only thing that
+    // varies between generations is core_message_capacity (each override
+    // passes its own constant - 1000 for 2G-5G, 1500 for 6G's AI-assisted
+    // scheduling, 2000 for 7G's brain-interface/quantum path). This used to
+    // be copy-pasted, overflow checks and all, into all six subclasses.
+    int calculate_cores_from_messages(int totalUsers, int messages_per_user,
+                                      int core_message_capacity) const;
 };
 
 /**

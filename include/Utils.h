@@ -68,7 +68,6 @@ public:
   static void print_table_separator(const std::vector<int> &widths);
 
   // Status indicators
-  static std::string get_status_icon(bool success);
   static std::string get_progress_bar(double percentage, int width = 20);
   static void draw_bar_graph(const std::string &label, double value,
                              double max_value, int width = 40);
@@ -90,6 +89,13 @@ class Logger {
 private:
   static bool enabled;
   static std::vector<std::string> logs;
+  // Guards `logs`. Simulator::run_threading_benchmark and the (currently
+  // unreachable but public) generate_network_parallel/connect_devices_async
+  // APIs call Logger::info/success from multiple ThreadPool workers at
+  // once; without this, concurrent push_back on the shared vector is a
+  // data race (and a real one - it showed up as reduced, not increased,
+  // throughput under the benchmark before this was added).
+  static std::mutex logsMutex;
 
   // Async logging components
   static std::queue<std::string> logQueue;
@@ -98,20 +104,40 @@ private:
   static std::thread loggingThread;
   static std::atomic<bool> running;
 
+  // When a full-screen renderer (ConsoleTUI) owns the terminal, the
+  // background logging thread must not also write to stdout: both writers
+  // target the same fd with no shared lock, so their output interleaves
+  // mid-escape-sequence and corrupts the screen. The TUI reads get_logs()
+  // directly to render its own event-log panel, so console echo is only
+  // needed outside of that mode.
+  static std::atomic<bool> consoleEcho;
+
+  // Suppresses info()/success() entirely - used by the headless benchmark,
+  // which otherwise logs one line per device connection (hundreds of KB of
+  // terminal output for a few thousand devices) and lets that logging cost
+  // dominate the very thing it's trying to measure. warning()/error() stay
+  // on regardless, since those indicate an actual problem worth seeing.
+  static std::atomic<bool> quiet;
+
   static void processLogs();
+  static void emit(const std::string &formatted);
 
 public:
   static void initialize();
   static void shutdown();
   static void enable() { enabled = true; }
   static void disable() { enabled = false; }
+  static void set_console_echo(bool value) { consoleEcho = value; }
+  static void set_quiet(bool value) { quiet = value; }
   static void log(const std::string &message);
   static void info(const std::string &message);
   static void warning(const std::string &message);
   static void error(const std::string &message);
   static void success(const std::string &message);
-  static void display_logs();
-  static void clear_logs() { logs.clear(); }
+  static void clear_logs() {
+    std::lock_guard<std::mutex> lock(logsMutex);
+    logs.clear();
+  }
   static const std::vector<std::string>& get_logs() { return logs; }
 };
 

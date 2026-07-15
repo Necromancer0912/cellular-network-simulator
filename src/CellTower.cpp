@@ -6,7 +6,7 @@
 #include <cmath>
 
 // Initialize static member
-int CellTower::tower_counter = 0;
+std::atomic<int> CellTower::tower_counter{0};
 
 // FrequencyChannel implementation
 FrequencyChannel::FrequencyChannel(int id, double start, double end, int max,
@@ -16,10 +16,6 @@ FrequencyChannel::FrequencyChannel(int id, double start, double end, int max,
 
 bool FrequencyChannel::is_full() const {
   return connected_devices.size() >= static_cast<size_t>(max_users);
-}
-
-int FrequencyChannel::get_available_slots() const {
-  return max_users - connected_devices.size();
 }
 
 // CellTower implementation
@@ -99,6 +95,7 @@ CellTower &CellTower::operator=(const CellTower &other) {
     }
 
     connected_devices.clear();
+    device_core_map.clear();
     initialize_channels();
   }
   return *this;
@@ -219,6 +216,7 @@ bool CellTower::connect_device(std::shared_ptr<UserDevice> device) {
 
   channels[channelIdx].connected_devices.push_back(device);
   connected_devices[device->get_device_id()] = device;
+  device_core_map[device->get_device_id()] = availableCore;
   availableCore->register_device(*device);
 
   return true;
@@ -251,12 +249,14 @@ bool CellTower::disconnect_device(int device_id) {
 
   connected_devices.erase(it);
 
-  // Unregister from core
-  for (auto &core : cores) {
-    if (core->get_current_device_count() > 0) {
-      core->unregister_device();
-      break;
-    }
+  // Unregister from the core this device was actually registered to.
+  // Previously this picked "the first core with a nonzero count", which
+  // silently unregisters the wrong core's device tally on any tower with
+  // more than one core.
+  auto coreIt = device_core_map.find(device_id);
+  if (coreIt != device_core_map.end()) {
+    coreIt->second->unregister_device();
+    device_core_map.erase(coreIt);
   }
 
   return true;
@@ -272,6 +272,7 @@ std::shared_ptr<UserDevice> CellTower::get_device(int device_id) const {
 }
 
 std::vector<std::shared_ptr<UserDevice>> CellTower::get_all_devices() const {
+  std::lock_guard<std::mutex> lock(tower_mutex);
   std::vector<std::shared_ptr<UserDevice>> devices;
   for (const auto &pair : connected_devices) {
     devices.push_back(pair.second);
@@ -281,6 +282,7 @@ std::vector<std::shared_ptr<UserDevice>> CellTower::get_all_devices() const {
 
 std::vector<std::shared_ptr<UserDevice>>
 CellTower::get_users_on_channel(int channel_id) const {
+  std::lock_guard<std::mutex> lock(tower_mutex);
   for (const auto &channel : channels) {
     if (channel.channel_id == channel_id) {
       return channel.connected_devices;
@@ -291,6 +293,7 @@ CellTower::get_users_on_channel(int channel_id) const {
 
 std::vector<std::shared_ptr<UserDevice>>
 CellTower::get_users_on_first_channel() const {
+  std::lock_guard<std::mutex> lock(tower_mutex);
   if (channels.empty()) {
     return std::vector<std::shared_ptr<UserDevice>>();
   }
@@ -298,6 +301,7 @@ CellTower::get_users_on_first_channel() const {
 }
 
 const FrequencyChannel &CellTower::get_channel(int channel_id) const {
+  std::lock_guard<std::mutex> lock(tower_mutex);
   for (const auto &channel : channels) {
     if (channel.channel_id == channel_id) {
       return channel;

@@ -4,7 +4,7 @@
 CXX := g++
 
 # Compiler flags
-CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -Wno-unused-variable -fpermissive
+CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic
 INCLUDES := -Iinclude
 
 # Debug flags
@@ -119,11 +119,16 @@ test: all
 	@echo "Compiling unit test objects..."
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/Protocol.cpp -o /tmp/proto_test.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/CellularCore.cpp -o /tmp/core_test.o
+	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/CellTower.cpp -o /tmp/celltower_test.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/UserDevice.cpp -o /tmp/userdevice_test.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/Utils.cpp -o /tmp/utils_test.o || true
+	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/Simulator.cpp -o /tmp/simulator_test.o
+	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/NetworkAnalytics.cpp -o /tmp/analytics_test.o
+	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c src/AdvancedMetrics.cpp -o /tmp/advmetrics_test.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c tests/test_protocol_core.cpp -o /tmp/test_protocol.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c tests/test_exceptions.cpp -o /tmp/test_exceptions.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c tests/test_concurrency.cpp -o /tmp/test_concurrency.o
+	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c tests/test_load_balancer.cpp -o /tmp/test_load_balancer.o
 	@$(CXX) $(CXXFLAGS) $(DEBUG_FLAGS) $(INCLUDES) -c tests/test_stubs.cpp -o /tmp/test_stubs.o
 
 	@echo "Linking and running test: protocol/core"
@@ -137,6 +142,10 @@ test: all
 	@echo "Linking and running test: concurrency"
 	@$(CXX) /tmp/test_concurrency.o /tmp/test_stubs.o /tmp/proto_test.o /tmp/core_test.o /tmp/userdevice_test.o /tmp/utils_test.o -o ./bin/unit_test_concurrency || true
 	@./bin/unit_test_concurrency || { echo "unit_test_concurrency failed"; exit 1; }
+
+	@echo "Linking and running test: load balancer"
+	@$(CXX) /tmp/test_load_balancer.o /tmp/test_stubs.o /tmp/proto_test.o /tmp/core_test.o /tmp/celltower_test.o /tmp/userdevice_test.o /tmp/utils_test.o /tmp/simulator_test.o /tmp/analytics_test.o /tmp/advmetrics_test.o -o ./bin/unit_test_load_balancer || true
+	@./bin/unit_test_load_balancer || { echo "unit_test_load_balancer failed"; exit 1; }
 	@echo "[==] Unit tests compiled and ran successfully"
 
 # Clean all build artifacts

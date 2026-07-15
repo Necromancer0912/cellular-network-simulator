@@ -3,6 +3,7 @@
 
 #include "Protocol.h"
 #include "UserDevice.h"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -13,7 +14,7 @@
  */
 class CellularCore {
 private:
-  static int core_counter;
+  static std::atomic<int> core_counter;
   int core_id;
   std::shared_ptr<Protocol> protocol;
   int max_devices;

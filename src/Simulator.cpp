@@ -14,15 +14,7 @@
 #include <thread>
 #include <condition_variable>
 
-// Live monitor namespace
-namespace {
-  static std::thread monitorThread;
-  static std::atomic<bool> monitorRun{false};
-  static std::condition_variable monitorCv;
-  static std::mutex monitorMutex;
-}
-
-Simulator::Simulator() 
+Simulator::Simulator()
   : towers("Cell Towers"), devices("User Devices"), threadPool(std::max(1u, std::thread::hardware_concurrency())),
     next_packet_id(1), dropped_packets(0), processed_packets(0), total_packets_routed(0) {
   initialize_protocols();
@@ -41,15 +33,7 @@ Simulator::Simulator()
   Logger::info("Cellular Network Simulator initialized");
 }
 
-Simulator::~Simulator() {
-  if (monitorRun.load()) {
-    monitorRun.store(false);
-    monitorCv.notify_all();
-    if (monitorThread.joinable()) {
-      monitorThread.join();
-    }
-  }
-}
+Simulator::~Simulator() = default;
 
 void Simulator::initialize_protocols() {
   available_protocols["2G"] = std::make_shared<TDMAProtocol>();
@@ -105,10 +89,9 @@ std::shared_ptr<CellTower> Simulator::get_tower(int index) const {
   return towers.get(index);
 }
 
-void Simulator::create_and_connect_device(const std::string &generation,
-                                          const std::string &name,
-                                          CommunicationType type,
-                                          int towerIndex) {
+std::shared_ptr<UserDevice> Simulator::connect_device_deferred_registration(
+    const std::string &generation, const std::string &name,
+    CommunicationType type, int towerIndex) {
   try {
     auto tower = get_tower(towerIndex);
     if (!tower) {
@@ -117,11 +100,18 @@ void Simulator::create_and_connect_device(const std::string &generation,
     }
 
     auto device = create_device(generation, name, type);
-    devices.add(device);
 
-    // Place device near tower
-    double r = ((double)rand() / RAND_MAX) * 300.0 + 50.0; // 50 to 350 meters radius
-    double theta = ((double)rand() / RAND_MAX) * 2.0 * 3.141592653589793;
+    // Place device near tower. rand() is not required to be reentrant, and
+    // this path is called concurrently from ThreadPool workers (see
+    // run_threading_benchmark and the parallel provisioning APIs below), so
+    // a thread_local generator is used instead of the shared libc rand()
+    // state - both for defined behavior and to avoid the workers
+    // serializing on whatever internal lock a given libc's rand() uses.
+    thread_local std::mt19937 positionRng(std::random_device{}());
+    std::uniform_real_distribution<double> radiusDist(50.0, 350.0);
+    std::uniform_real_distribution<double> angleDist(0.0, 2.0 * 3.141592653589793);
+    double r = radiusDist(positionRng);
+    double theta = angleDist(positionRng);
     device->set_position(tower->get_x() + r * cos(theta), tower->get_y() + r * sin(theta));
 
     bool connected = tower->connect_device(device);
@@ -133,11 +123,20 @@ void Simulator::create_and_connect_device(const std::string &generation,
       stats.failed_connections++;
       Logger::warning("Failed to connect device " + name);
     }
+    return device;
   } catch (const CellularNetworkException &e) {
     stats.failed_connections++;
     Logger::error(std::string("Connection failed: ") + e.what());
     throw;
   }
+}
+
+void Simulator::create_and_connect_device(const std::string &generation,
+                                          const std::string &name,
+                                          CommunicationType type,
+                                          int towerIndex) {
+  auto device = connect_device_deferred_registration(generation, name, type, towerIndex);
+  devices.add(device);
 }
 
 void Simulator::connect_devices_async(const std::string &generation, int count,
@@ -860,110 +859,75 @@ void Simulator::analyze7G() const {
   IOHelpers::print(" "), IOHelpers::print("Capacity:"), IOHelpers::print(" "), IOHelpers::print(protocol->get_users_per_channel()), IOHelpers::print(" users"), IOHelpers::printNewline();
 }
 
-void Simulator::run_threading_benchmark() {
-  OutputFormatter::print_header("Threading Performance Benchmark");
-
-  const int NUM_DEVICES = 2000;
-  const std::string GENERATION = "5G";
-  
-  // Create a dedicated tower for benchmarking
-  std::string towerName = "Benchmark-Tower";
-  create_tower(GENERATION, towerName, 100.0, 10);
-  int towerIdx = get_tower_count() - 1;
-  (void)towerIdx; // Suppress unused warning
-  
-  IOHelpers::print(" Benchmarking connection of "), IOHelpers::print(NUM_DEVICES), IOHelpers::print(" devices..."), IOHelpers::printNewline();
-  IOHelpers::print(" ----------------------------------------"), IOHelpers::printNewline();
-
-  // 1. Single Threaded Test
-  auto start_single = std::chrono::high_resolution_clock::now();
-
-  for (int i = 0; i < NUM_DEVICES; i++) {
-    // Simulate heavier work per connection to make parallelism beneficial
-    std::string name = "ST-Dev-" + std::to_string(i);
-    auto device = create_device(GENERATION, name, CommunicationType::DATA);
-    // Simulated work: small CPU-bound loop + sleep
-    volatile int x = 0;
-    for (int k = 0; k < 1000; ++k) x += k % 7;
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-  }
-
-  auto end_single = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double, std::milli> duration_single = end_single - start_single;
-
-  IOHelpers::print(" Single-Threaded Time: "), IOHelpers::print(duration_single.count()), IOHelpers::print(" ms"), IOHelpers::printNewline();
-
-  // 2. Multi Threaded Test
-  auto start_multi = std::chrono::high_resolution_clock::now();
-
-  std::vector<std::future<void>> futures;
-  futures.reserve(NUM_DEVICES);
-  for (int i = 0; i < NUM_DEVICES; i++) {
-    futures.push_back(threadPool.enqueue([this, i, GENERATION] {
-      try {
-        std::string name = "MT-Dev-" + std::to_string(i);
-        auto device = create_device(GENERATION, name, CommunicationType::DATA);
-        volatile int x = 0;
-        for (int k = 0; k < 1000; ++k) x += k % 7;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      } catch (...) {
-        // Capture but ignore for benchmark
-      }
-    }));
-  }
-
-  for (auto &f : futures) {
-    f.wait();
-  }
-  
-  auto end_multi = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double, std::milli> duration_multi = end_multi - start_multi;
-
-  IOHelpers::print(" Multi-Threaded Time: "), IOHelpers::print(duration_multi.count()), IOHelpers::print(" ms"), IOHelpers::printNewline();
-            
-  IOHelpers::print(" ----------------------------------------"), IOHelpers::printNewline();
-  
-  double speedup = duration_single.count() / duration_multi.count();
-  
-  IOHelpers::print(" Speedup Factor: "), IOHelpers::print(speedup), IOHelpers::print("x"), IOHelpers::printNewline();
-            
-  if (speedup > 1.0) {
-      IOHelpers::print(" Result: Multi-threading is faster for this workload."), IOHelpers::printNewline();
-  } else {
-      IOHelpers::print(" Result: Overhead outweighs benefits for this workload size."), IOHelpers::printNewline();
-  }
-}
-
-// Headless benchmark variant (defaults to GOOD mode)
 void Simulator::run_threading_benchmark(int devices, int threads, const std::string &csvPath) {
   if (threads <= 0) {
     threads = std::max(1u, std::thread::hardware_concurrency());
   }
 
+  // This benchmark compares connecting `devices` devices to `threads`
+  // independent 5G towers, sequentially vs. through the ThreadPool, one
+  // worker per tower's share of devices. Two things this deliberately does
+  // NOT do, because they would misrepresent what's being measured:
+  //   1. No artificial sleep/busy-loop per device. An earlier version added
+  //      a synthetic delay to "make parallelism worth it," which meant the
+  //      reported speedup mostly reflected N threads sleeping concurrently,
+  //      not the cost of the real connection path (capacity checks, channel
+  //      allocation, core registration, collection inserts, logging).
+  //   2. No single shared mutex wrapping the whole connect call. That lock
+  //      fully serialized the multi-threaded run's real work, so only the
+  //      (fake) work outside the lock actually ran in parallel. CellTower
+  //      and NetworkCollection<T> now guard their own state internally, and
+  //      each thread here is given its own tower, so lock contention is
+  //      real but not total.
+  // Devices are spread round-robin across `threads` towers so the single-
+  // and multi-threaded runs do byte-for-byte the same work, just scheduled
+  // differently - that's what makes the comparison fair.
   std::atomic<int> connected_single{0};
   std::atomic<int> failures_single{0};
   std::atomic<int> connected_multi{0};
   std::atomic<int> failures_multi{0};
-  std::mutex device_mutex;  // Protect simulator state modifications
 
-  // === RUN 1: Single-threaded with fresh tower ===
-  std::string towerName1 = "Benchmark-Tower-Single";
-  try {
-    create_tower("5G", towerName1, 20.0, 10);
-  } catch (...) {
-    // ignore
-  }
-  int towerIndex1 = get_tower_count() - 1;
+  // Per-device success/failure logging would otherwise dominate the timed
+  // section (string formatting + vector growth + queue push per device),
+  // so it's off for the duration of the benchmark and restored afterward.
+  Logger::set_quiet(true);
 
+  // Each CellularCore for the 5G protocol holds ~92 devices (fixed by
+  // message overhead, independent of bandwidth), and max_supported_devices
+  // is min(channel capacity, core capacity) - so undersized towers hit a
+  // capacity wall partway through the run. Past that wall, every further
+  // connection attempt throws and is caught, and exception handling is
+  // expensive enough to dominate the timing - at that point the benchmark
+  // is measuring exception overhead, not connection throughput. Sizing
+  // cores to the actual per-tower share of devices (with a safety margin)
+  // keeps every device connectable so the timed section reflects the real
+  // connection path end to end.
+  const int devicesPerTower = threads > 0 ? (devices + threads - 1) / threads : devices;
+  const int coresPerTower = std::max(10, static_cast<int>(std::ceil(devicesPerTower / 92.0 * 1.5)));
+
+  auto make_towers = [this, coresPerTower](const std::string &prefix, int count) {
+    std::vector<int> indices;
+    for (int t = 0; t < count; ++t) {
+      try {
+        create_tower("5G", prefix + "-" + std::to_string(t), 20.0, coresPerTower);
+        indices.push_back(get_tower_count() - 1);
+      } catch (...) {
+        // Tower creation failure just means that slot gets skipped below.
+      }
+    }
+    return indices;
+  };
+
+  // === RUN 1: Single-threaded baseline ===
+  std::vector<int> singleTowers = make_towers("Benchmark-Single", threads);
   auto start = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < devices; ++i) {
+    if (singleTowers.empty()) break;
     try {
       std::string name = "Bench-Dev-" + std::to_string(i);
-      create_and_connect_device("5G", name, CommunicationType::DATA, towerIndex1);
+      int towerIdx = singleTowers[i % singleTowers.size()];
+      create_and_connect_device("5G", name, CommunicationType::DATA, towerIdx);
       connected_single++;
-      // Heavier CPU burn to make parallel work worthwhile
-      volatile int x = 0; for (int k = 0; k < 10000; ++k) x += k;
-      std::this_thread::sleep_for(std::chrono::microseconds(500));
     } catch (...) {
       failures_single++;
     }
@@ -971,43 +935,53 @@ void Simulator::run_threading_benchmark(int devices, int threads, const std::str
   auto end = std::chrono::high_resolution_clock::now();
   double singleMs = std::chrono::duration<double, std::milli>(end - start).count();
 
-  // === RUN 2: Multi-threaded with fresh tower ===
-  std::string towerName2 = "Benchmark-Tower-Multi";
-  try {
-    create_tower("5G", towerName2, 20.0, 10);
-  } catch (...) {
-    // ignore
-  }
-  int towerIndex2 = get_tower_count() - 1;
-
-  // Multi-threaded using the temporary ThreadPool
-  // Scope the pool explicitly to ensure proper cleanup
+  // === RUN 2: Same workload, batched one chunk per tower/worker ===
+  // A first version of this benchmark enqueued one ThreadPool task per
+  // device (4000 devices -> 4000 tasks). Connecting one device is on the
+  // order of a few microseconds of real work, which is smaller than the
+  // ThreadPool's own per-task dispatch cost (queue mutex, condition
+  // variable wake, packaged_task/future allocation) - so that version
+  // measured scheduling overhead, not the benefit of parallelism, and
+  // actually came out slower than the sequential run. Batching devices
+  // into one task per tower amortizes that dispatch cost across hundreds
+  // of connections instead of one, which is what makes the parallel work
+  // actually dominate the measurement instead of the scheduler.
+  std::vector<int> multiTowers = make_towers("Benchmark-Multi", threads);
   {
     ThreadPool benchPool(threads);
-    
+
     start = std::chrono::high_resolution_clock::now();
     std::vector<std::future<void>> futures;
-    for (int i = 0; i < devices; ++i) {
-      futures.push_back(benchPool.enqueue([this, i, towerIndex2, &device_mutex, &connected_multi, &failures_multi] {
-        try {
-          std::string name = "Bench-Dev-PT-" + std::to_string(i);
-          {
-            std::lock_guard<std::mutex> lock(device_mutex);
-            create_and_connect_device("5G", name, CommunicationType::DATA, towerIndex2);
+    for (size_t slot = 0; slot < multiTowers.size(); ++slot) {
+      int towerIdx = multiTowers[slot];
+      futures.push_back(benchPool.enqueue([this, slot, devices, threads, towerIdx, &connected_multi, &failures_multi] {
+        // Each worker publishes into the shared `devices` collection once,
+        // as a batch, instead of once per device. With one lock per device
+        // (the original approach), every worker's per-device work is tiny
+        // enough that time spent contending for the devices-collection
+        // mutex dominates the run and erases the benefit of using separate
+        // towers per thread in the first place - the earlier version of
+        // this benchmark plateaued at ~1.0x speedup for exactly that
+        // reason. Batching the publish step is the standard fix: keep the
+        // lock, just take it far less often.
+        std::vector<std::shared_ptr<UserDevice>> localBatch;
+        for (int i = static_cast<int>(slot); i < devices; i += threads) {
+          try {
+            std::string name = "Bench-Dev-PT-" + std::to_string(i);
+            auto device = connect_device_deferred_registration("5G", name, CommunicationType::DATA, towerIdx);
+            localBatch.push_back(device);
+            connected_multi++;
+          } catch (...) {
+            failures_multi++;
           }
-          connected_multi++;
-          // Heavier CPU burn to make parallel work worthwhile
-          volatile int x = 0; for (int k = 0; k < 10000; ++k) x += k;
-          std::this_thread::sleep_for(std::chrono::microseconds(500));
-        } catch (...) {
-          failures_multi++;
         }
+        this->devices.add_batch(localBatch);
       }));
     }
     for (auto &f : futures) f.wait();
     end = std::chrono::high_resolution_clock::now();
   } // ThreadPool destroyed here after all futures are done
-  
+
   double multiMs = std::chrono::duration<double, std::milli>(end - start).count();
 
   double speedup = singleMs / (multiMs > 0.0 ? multiMs : 1.0);
@@ -1088,280 +1062,8 @@ void Simulator::run_threading_benchmark(int devices, int threads, const std::str
       IOHelpers::print("  Failed to write CSV to: "); IOHelpers::print(csvPath.c_str()); IOHelpers::printNewline();
     }
   }
-}
 
-void Simulator::run_threading_benchmark(BenchmarkMode mode, int devices, int threads, const std::string &csvPath) {
-  if (threads <= 0) threads = std::max(1u, std::thread::hardware_concurrency());
-
-  std::atomic<int> failures_single{0};
-  std::atomic<int> connected_single{0};
-  std::atomic<int> failures_multi{0};
-  std::atomic<int> connected_multi{0};
-  std::mutex device_mutex;  // Protect simulator state modifications
-
-  auto work_per_device = [&](int i, bool simulateFailure, std::atomic<int>& connected, std::atomic<int>& failures, int towerIdx) {
-    try {
-      std::string name = "BM-" + std::to_string(i);
-      // Lock only when modifying simulator state
-      {
-        std::lock_guard<std::mutex> lock(device_mutex);
-        create_and_connect_device("5G", name, CommunicationType::DATA, towerIdx);
-      }
-      // Mode-specific additional work
-      if (mode == BenchmarkMode::MINIMAL) {
-        // light
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      } else if (mode == BenchmarkMode::GOOD) {
-        // medium: some CPU + small sleep + generate messages
-        volatile int x = 0; for (int k=0;k<2000;++k) x += k;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        auto tower = get_tower(towerIdx);
-        if (tower) (void)tower->get_utilization();
-      } else {
-        // WILD: heavier CPU, more messages, occasional simulated failures
-        volatile int x = 0; for (int k=0;k<8000;++k) x += k;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        auto tower = get_tower(towerIdx);
-        if (tower) (void)tower->get_utilization();
-        if (simulateFailure) {
-          // artificially attempt to overfill to trigger errors
-          try {
-            std::lock_guard<std::mutex> lock(device_mutex);
-            for (int r=0;r<5;r++) {
-              create_and_connect_device("4G", name+"-OF", CommunicationType::BOTH, towerIdx);
-            }
-          } catch (...) { failures++; }
-        }
-      }
-      connected++;
-    } catch (...) {
-      failures++;
-    }
-  };
-
-  // Prepare RNG for simulated failures in WILD mode
-  std::mt19937 rng((unsigned)std::chrono::high_resolution_clock::now().time_since_epoch().count());
-  std::uniform_int_distribution<int> dist(0, 100);
-
-  // === RUN 1: Single-Threaded ===
-  // Create fresh tower for single-threaded test
-  std::string towerName1 = "Benchmark-Tower-Single";
-  try { create_tower("5G", towerName1, 20.0, 10); } catch(...) {}
-  int towerIndex1 = get_tower_count() - 1;
-
-  auto t0 = std::chrono::high_resolution_clock::now();
-  for (int i = 0; i < devices; ++i) {
-    bool simFail = (mode == BenchmarkMode::WILD) && (dist(rng) < 10);
-    work_per_device(i, simFail, connected_single, failures_single, towerIndex1);
-  }
-  auto t1 = std::chrono::high_resolution_clock::now();
-  double singleMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-  // === RUN 2: Multi-Threaded ===
-  // Create fresh tower for multi-threaded test
-  std::string towerName2 = "Benchmark-Tower-Multi";
-  try { create_tower("5G", towerName2, 20.0, 10); } catch(...) {}
-  int towerIndex2 = get_tower_count() - 1;
-
-  // Parallel run using the temporary ThreadPool
-  // Scope the pool explicitly to ensure proper cleanup
-  {
-    ThreadPool benchPool(threads);
-    
-    t0 = std::chrono::high_resolution_clock::now();
-    std::vector<std::future<void>> futs;
-    for (int i = 0; i < devices; ++i) {
-      bool simFail = (mode == BenchmarkMode::WILD) && (dist(rng) < 10);
-      futs.push_back(benchPool.enqueue([=, &work_per_device, &connected_multi, &failures_multi]() mutable {
-        work_per_device(i, simFail, connected_multi, failures_multi, towerIndex2);
-      }));
-    }
-    for (auto &f : futs) f.wait();
-    t1 = std::chrono::high_resolution_clock::now();
-  } // ThreadPool destroyed here after all futures are done
-  
-  double multiMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-  double speedup = singleMs / (multiMs > 0.0 ? multiMs : 1.0);
-
-  // Enhanced output formatting
-  OutputFormatter::print_header("THREADING BENCHMARK RESULTS");
-  IOHelpers::printNewline();
-  IOHelpers::print("  Mode:         "); 
-  IOHelpers::print((mode==BenchmarkMode::MINIMAL?"MINIMAL":mode==BenchmarkMode::GOOD?"GOOD":"WILD")); 
-  IOHelpers::printNewline();
-  IOHelpers::print("  Devices:      "); IOHelpers::print(devices); IOHelpers::printNewline();
-  IOHelpers::print("  Threads:      "); IOHelpers::print(threads); IOHelpers::printNewline();
-  IOHelpers::printNewline();
-  
-  IOHelpers::print("  SINGLE-THREADED RESULTS:"); IOHelpers::printNewline();
-  IOHelpers::print("    Time:       "); IOHelpers::printDouble(singleMs,2); IOHelpers::print(" ms"); IOHelpers::printNewline();
-  IOHelpers::print("    Connected:  "); IOHelpers::print((int)connected_single); IOHelpers::printNewline();
-  IOHelpers::print("    Failures:   "); IOHelpers::print((int)failures_single); IOHelpers::printNewline();
-  IOHelpers::printNewline();
-  
-  IOHelpers::print("  MULTI-THREADED RESULTS ("); IOHelpers::print(threads); IOHelpers::print(" threads):"); IOHelpers::printNewline();
-  IOHelpers::print("    Time:       "); IOHelpers::printDouble(multiMs,2); IOHelpers::print(" ms"); IOHelpers::printNewline();
-  IOHelpers::print("    Connected:  "); IOHelpers::print((int)connected_multi); IOHelpers::printNewline();
-  IOHelpers::print("    Failures:   "); IOHelpers::print((int)failures_multi); IOHelpers::printNewline();
-  IOHelpers::printNewline();
-  
-  IOHelpers::print("  PERFORMANCE:"); IOHelpers::printNewline();
-  IOHelpers::print("    Speedup:    "); IOHelpers::printDouble(speedup,2); IOHelpers::print("x"); IOHelpers::printNewline();
-  
-  // Realistic status based on actual multi-threading performance
-  if (threads == 1) {
-    // For single thread, expect ~1.0x (overhead should be minimal)
-    if (speedup >= 0.95) {
-      IOHelpers::print("    Status:     Excellent (minimal overhead)"); IOHelpers::printNewline();
-    } else if (speedup >= 0.85) {
-      IOHelpers::print("    Status:     Good (acceptable overhead)"); IOHelpers::printNewline();
-    } else if (speedup >= 0.70) {
-      IOHelpers::print("    Status:     Moderate (noticeable overhead)"); IOHelpers::printNewline();
-    } else {
-      IOHelpers::print("    Status:     Poor (high ThreadPool overhead)"); IOHelpers::printNewline();
-    }
-  } else {
-    // For multiple threads, use realistic thresholds
-    if (speedup >= 5.0) {
-      IOHelpers::print("    Status:     Excellent parallelization ("); 
-      IOHelpers::printDouble(speedup, 2);
-      IOHelpers::print("x speedup)");
-      IOHelpers::printNewline();
-    } else if (speedup >= 2.0) {
-      IOHelpers::print("    Status:     Good parallelization (");
-      IOHelpers::printDouble(speedup, 2);
-      IOHelpers::print("x speedup)");
-      IOHelpers::printNewline();
-    } else if (speedup >= 1.5) {
-      IOHelpers::print("    Status:     Moderate parallelization (");
-      IOHelpers::printDouble(speedup, 2);
-      IOHelpers::print("x speedup)");
-      IOHelpers::printNewline();
-    } else if (speedup >= 1.0) {
-      IOHelpers::print("    Status:     Low performance (");
-      IOHelpers::printDouble(speedup, 2);
-      IOHelpers::print("x speedup, high overhead)");
-      IOHelpers::printNewline();
-    } else {
-      IOHelpers::print("    Status:     Very poor (slower than single-threaded!)"); IOHelpers::printNewline();
-    }
-  }
-  IOHelpers::printNewline();
-
-  if (!csvPath.empty()) {
-    std::ofstream out(csvPath);
-    if (out) {
-      out << "mode,devices,threads,single_ms,multi_ms,speedup,connected_single,failures_single,connected_multi,failures_multi\n";
-      out << (mode==BenchmarkMode::MINIMAL?"MINIMAL":mode==BenchmarkMode::GOOD?"GOOD":"WILD") << "," 
-          << devices << "," << threads << "," << singleMs << "," << multiMs << "," << speedup << "," 
-          << (int)connected_single << "," << (int)failures_single << "," 
-          << (int)connected_multi << "," << (int)failures_multi << "\n";
-      out.close();
-      IOHelpers::print("  Results saved to: "); IOHelpers::print(csvPath.c_str()); IOHelpers::printNewline();
-    }
-  }
-}
-
-void Simulator::start_live_monitor(int interval_seconds) {
-  if (monitorRun.load()) {
-    Logger::warning("Monitor is already running!");
-    return;
-  }
-  monitorRun.store(true);
-  monitorThread = std::thread([this, interval_seconds]() {
-    while (monitorRun.load()) {
-      try {
-        // Print separator for clarity
-        IOHelpers::printNewline();
-        IOHelpers::print("════════════════════════════════════════════════════════════");
-        IOHelpers::printNewline();
-        IOHelpers::print("[LIVE MONITOR UPDATE]");
-        IOHelpers::printNewline();
-        IOHelpers::printNewline();
-        
-        // Print summary stats with safety checks
-        int towerCount = get_tower_count();
-        int deviceCount = get_device_count();
-        
-        IOHelpers::print("  Network Summary:"); 
-        IOHelpers::printNewline();
-        IOHelpers::print("    Total Towers:  "); 
-        IOHelpers::print(towerCount); 
-        IOHelpers::printNewline();
-        IOHelpers::print("    Total Devices: "); 
-        IOHelpers::print(deviceCount); 
-        IOHelpers::printNewline();
-        IOHelpers::printNewline();
-        
-        if (towerCount == 0) {
-          IOHelpers::print("  No towers in network.");
-          IOHelpers::printNewline();
-        } else {
-          IOHelpers::print("  Tower Utilization:");
-          IOHelpers::printNewline();
-          
-          // per-tower utilization with bounds checking
-          for (int i = 0; i < towerCount; ++i) {
-            auto t = get_tower(i);
-            if (t) {
-              double util = t->get_utilization();
-              IOHelpers::print("    Tower "); 
-              IOHelpers::printInt(i);
-              IOHelpers::print(" (");
-              IOHelpers::print(t->get_location().c_str()); 
-              IOHelpers::print(") ");
-              IOHelpers::print(OutputFormatter::get_progress_bar(util / 100.0, 15).c_str());
-              IOHelpers::print(" ");
-              IOHelpers::printInt(t->get_current_device_count());
-              IOHelpers::print("/");
-              IOHelpers::printInt(t->get_max_supported_devices());
-              IOHelpers::print(" (");
-              IOHelpers::printDouble(util, 1); 
-              IOHelpers::print("%)"); 
-              IOHelpers::printNewline();
-            }
-          }
-        }
-        
-        IOHelpers::printNewline();
-        IOHelpers::print("  [Next update in ");
-        IOHelpers::print(interval_seconds);
-        IOHelpers::print(" seconds... Press Option 17 to stop]");
-        IOHelpers::printNewline();
-        
-      } catch (...) {
-        // Silently handle errors in monitor thread
-        IOHelpers::printNewline();
-        IOHelpers::print("[LiveMonitor] Error occurred during update");
-        IOHelpers::printNewline();
-      }
-      
-      // Wait for interval or until stopped
-      std::unique_lock<std::mutex> lk(monitorMutex);
-      monitorCv.wait_for(lk, std::chrono::seconds(interval_seconds), []() { 
-        return !monitorRun.load(); 
-      });
-    }
-  });
-}
-
-void Simulator::stop_live_monitor() {
-  if (!monitorRun.load()) {
-    Logger::warning("Monitor is not currently running!");
-    return;
-  }
-  Logger::info("Stopping live network monitor...");
-  monitorRun.store(false);
-  monitorCv.notify_all();
-  if (monitorThread.joinable()) {
-    monitorThread.join();
-    Logger::success("Live network monitor stopped successfully.");
-  }
-}
-
-bool Simulator::is_monitor_running() const {
-  return monitorRun.load();
+  Logger::set_quiet(false);
 }
 
 void Simulator::apply_beamforming_to_tower(int towerIndex, double factor) {
@@ -1658,11 +1360,6 @@ void Simulator::display_total_devices_summary() const {
 }
 
 void Simulator::reset() {
-  // Stop monitor if running
-  if (is_monitor_running()) {
-    stop_live_monitor();
-  }
-  
   towers.clear();
   devices.clear();
   stats.total_connections = 0;

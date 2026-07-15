@@ -4,7 +4,7 @@
 #include <climits>
 
 // Initialize static member
-int CellularCore::core_counter = 0;
+std::atomic<int> CellularCore::core_counter{0};
 
 CellularCore::CellularCore(std::shared_ptr<Protocol> proto)
     : protocol(proto), max_devices(0), current_device_count(0),
@@ -100,7 +100,9 @@ void CellularCore::display_core_info() const {
   IOHelpers::printNewline();
   
   IOHelpers::print("    Total Messages: ");
-  IOHelpers::printInt(total_messages_generated);
+  // total_messages_generated is a long long (it can legitimately exceed
+  // INT_MAX under sustained load); printInt(int) would silently truncate it.
+  IOHelpers::print(total_messages_generated);
   IOHelpers::printNewline();
   
   IOHelpers::print("    Utilization: ");

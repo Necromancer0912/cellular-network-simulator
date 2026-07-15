@@ -120,7 +120,7 @@ void OutputFormatter::print_sub_header(const std::string &title, int width) {
 void OutputFormatter::print_section(const std::string &title) {
   IOHelpers::printNewline();
   IOHelpers::print(ANSI_BOLD_CYAN);
-  IOHelpers::print("❯ ");
+  IOHelpers::print("> ");
   IOHelpers::print(ANSI_RESET);
   IOHelpers::println(title.c_str());
   IOHelpers::printNewline();
@@ -283,10 +283,6 @@ void OutputFormatter::print_table_separator(const std::vector<int> &widths) {
   IOHelpers::printNewline();
 }
 
-std::string OutputFormatter::get_status_icon(bool success) {
-  return success ? (std::string(ANSI_BOLD_GREEN) + "✔ OK" + ANSI_RESET) : (std::string(ANSI_BOLD_RED) + "✘ ERROR" + ANSI_RESET);
-}
-
 std::string OutputFormatter::get_progress_bar(double percentage, int width) {
   int filled = static_cast<int>(percentage * width);
   std::string bar = "";
@@ -368,6 +364,9 @@ std::mutex Logger::queueMutex;
 std::condition_variable Logger::queueCV;
 std::thread Logger::loggingThread;
 std::atomic<bool> Logger::running(false);
+std::atomic<bool> Logger::consoleEcho(true);
+std::atomic<bool> Logger::quiet(false);
+std::mutex Logger::logsMutex;
 
 void Logger::initialize() {
   if (!running) {
@@ -395,88 +394,56 @@ void Logger::processLogs() {
       std::string message = logQueue.front();
       logQueue.pop();
       lock.unlock();
-      IOHelpers::println(message.c_str());
+      // Skip the raw stdout write while ConsoleTUI owns the terminal - see
+      // consoleEcho comment in Utils.h. The message is already in logs[]
+      // for the TUI's own event-log panel to pick up.
+      if (consoleEcho) {
+        IOHelpers::println(message.c_str());
+      }
       lock.lock();
     }
   }
 }
 
-void Logger::log(const std::string &message) {
-  if (enabled) {
-    logs.push_back(message);
-    if (running) {
-      std::lock_guard<std::mutex> lock(queueMutex);
-      logQueue.push(message);
-      queueCV.notify_one();
-    } else {
-      IOHelpers::println(message.c_str());
-    }
+void Logger::emit(const std::string &formatted) {
+  {
+    std::lock_guard<std::mutex> lock(logsMutex);
+    logs.push_back(formatted);
   }
+  if (running) {
+    std::lock_guard<std::mutex> lock(queueMutex);
+    logQueue.push(formatted);
+    queueCV.notify_one();
+  } else {
+    IOHelpers::println(formatted.c_str());
+  }
+}
+
+void Logger::log(const std::string &message) {
+  if (!enabled) return;
+  emit(message);
 }
 
 void Logger::info(const std::string &message) {
-  std::string formatted = "\033[1;36m[INFO]\033[0m " + message;
-  if (enabled) {
-    logs.push_back(formatted);
-    if (running) {
-      std::lock_guard<std::mutex> lock(queueMutex);
-      logQueue.push(formatted);
-      queueCV.notify_one();
-    } else {
-      IOHelpers::println(formatted.c_str());
-    }
-  }
+  if (!enabled || quiet) return;
+  emit("\033[1;36m[INFO]\033[0m " + message);
 }
 
 void Logger::warning(const std::string &message) {
-  std::string formatted = "\033[1;33m[WARNING]\033[0m " + message;
-  if (enabled) {
-    logs.push_back(formatted);
-    if (running) {
-      std::lock_guard<std::mutex> lock(queueMutex);
-      logQueue.push(formatted);
-      queueCV.notify_one();
-    } else {
-      IOHelpers::println(formatted.c_str());
-    }
-  }
+  if (!enabled) return;
+  emit("\033[1;33m[WARNING]\033[0m " + message);
 }
 
 void Logger::error(const std::string &message) {
-  std::string formatted = "\033[1;31m[ERROR]\033[0m " + message;
-  if (enabled) {
-    logs.push_back(formatted);
-    if (running) {
-      std::lock_guard<std::mutex> lock(queueMutex);
-      logQueue.push(formatted);
-      queueCV.notify_one();
-    } else {
-      IOHelpers::println(formatted.c_str());
-    }
-  }
+  if (!enabled) return;
+  emit("\033[1;31m[ERROR]\033[0m " + message);
 }
 
 void Logger::success(const std::string &message) {
-  std::string formatted = "\033[1;32m[OK]\033[0m " + message;
-  if (enabled) {
-    logs.push_back(formatted);
-    if (running) {
-      std::lock_guard<std::mutex> lock(queueMutex);
-      logQueue.push(formatted);
-      queueCV.notify_one();
-    } else {
-      IOHelpers::println(formatted.c_str());
-    }
-  }
+  if (!enabled || quiet) return;
+  emit("\033[1;32m[OK]\033[0m " + message);
 }
 
-void Logger::display_logs() {
-  IOHelpers::printNewline();
-  OutputFormatter::print_sub_header("Log History");
-  for (const auto &logEntry : logs) {
-    IOHelpers::println(logEntry.c_str());
-  }
-}
 
 // StringUtils implementation
 std::string StringUtils::to_upper(const std::string &str) {
@@ -581,7 +548,7 @@ int OutputFormatter::select_from_menu(const std::string &title, const std::vecto
     
     for (int i = 0; i < num_options; i++) {
       if (i == selected) {
-        IOHelpers::print("  \033[1;32m❯ \033[1;37;44m ");
+        IOHelpers::print("  \033[1;32m> \033[1;37;44m ");
         IOHelpers::print(options[i].c_str());
         int padding = width - 6 - options[i].length();
         if (padding > 0) {

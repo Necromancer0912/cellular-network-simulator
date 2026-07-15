@@ -18,7 +18,7 @@ int main() {
         const int perThread = 1000;
         std::vector<std::thread> ths;
         for (int t = 0; t < threads; ++t) {
-            ths.emplace_back([&core, perThread]() {
+            ths.emplace_back([&core]() {
                 for (int i = 0; i < perThread; ++i) {
                     core.generate_messages(1);
                 }

@@ -16,10 +16,7 @@
 #include <cmath>
 #include <chrono>
 
-// Forward declaration of custom network creation helper from main.cpp
-void createCustomNetwork(Simulator &sim);
-
-ConsoleTUI::ConsoleTUI(Simulator &sim) 
+ConsoleTUI::ConsoleTUI(Simulator &sim)
   : simulator(sim), analytics(&sim), activeTab(0), selectedTowerIdx(0), devicesScrollOffset(0), quit(false),
     commandMode(false), commandInput(""), commandCursorPos(0), historyIndex(-1), autoSuggestHint(""),
     searchMode(false), searchQuery(""),
@@ -276,7 +273,7 @@ void ConsoleTUI::drawHeader(int cols) {
     "Dashboard", "Towers", "Devices", "Analytics", "Visual Map", "Actions", "Help"
   };
 
-  std::string title = "⚡ CELLULAR SIMULATOR";
+  std::string title = "> CELLULAR SIMULATOR";
   int titleLen = 21; // visible length of title
 
   // Calculate how much space tabs need
@@ -1171,16 +1168,6 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
     }
   }
 
-  // Helper: map coordinate to grid
-  auto getGridCoords = [&](double x, double y, int &r, int &c) {
-    r = (int)((y * mapH) / 1000.0);
-    c = (int)((x * mapW) / 1000.0);
-    if (r < 0) r = 0;
-    if (r >= mapH) r = mapH - 1;
-    if (c < 0) c = 0;
-    if (c >= mapW) c = mapW - 1;
-  };
-
   // 3. Draw Core Router (▣) at center of the grid map
   int core_r = mapH / 2;
   int core_c = mapW / 2;
@@ -1339,7 +1326,7 @@ void ConsoleTUI::drawMapTab(int rows, int cols) {
         int pc = (int)(g_c0 + (g_c1 - g_c0) * pkt.progress);
 
         if (pr >= 0 && pr < mapH && pc >= 0 && pc < mapW) {
-          std::string pkt_icon = (pkt.type == "VOICE") ? "✦" : "◆";
+          std::string pkt_icon = (pkt.type == "VOICE") ? "o" : "◆";
           std::string pkt_color = (pkt.type == "VOICE") ? "\033[1;33m" : "\033[1;36m"; // Bold Yellow / Bold Cyan
           
           if (mapGrid[pr][pc].type == 0) {
@@ -1604,17 +1591,16 @@ void ConsoleTUI::drawActionsTab(int rows, int cols) {
     std::string key;
     std::string label;
     std::string desc;
-    std::string icon;
   };
 
   std::vector<ActionItem> actions = {
-    { "A", "Traffic Spike",       "Simulate real-time device movements and traffic spikes", "⚡" },
-    { "S", "Load Scenario",       "Open dialog to select a predefined network scenario",   "📂" },
-    { "F", "Create Tower",        "Open modal to create a tower with custom settings",      "🗼" },
-    { "D", "Create Device",       "Open modal to register and connect a new device",        "📱" },
-    { "G", "Toggle Beamforming",  "Boost the selected tower's capacity by 2.5x",            "📡" },
-    { "H", "Reset Simulator",     "Purge all towers, devices, and metrics",                 "🔄" },
-    { "Q", "Exit Simulator",      "Safely close the TUI and restore terminal",              "🚪" }
+    { "A", "Traffic Spike",       "Simulate real-time device movements and traffic spikes" },
+    { "S", "Load Scenario",       "Open dialog to select a predefined network scenario"   },
+    { "F", "Create Tower",        "Open modal to create a tower with custom settings"      },
+    { "D", "Create Device",       "Open modal to register and connect a new device"        },
+    { "G", "Toggle Beamforming",  "Boost the selected tower's capacity by 2.5x"            },
+    { "H", "Reset Simulator",     "Purge all towers, devices, and metrics"                 },
+    { "Q", "Exit Simulator",      "Safely close the TUI and restore terminal"              }
   };
 
   // Clamp actionsSelectedIdx
@@ -1748,6 +1734,7 @@ void ConsoleTUI::drawHelpTab(int rows, int cols) {
   printCommand(rr++, c2, "adddevice <args>", "Register new cellular device");
   printCommand(rr++, c2, "beamforming <id> <x>", "Boost custom tower capacity");
   printCommand(rr++, c2, "handovers <count>", "Simulate random roam handovers");
+  printCommand(rr++, c2, "balance", "Move devices off overloaded towers");
 
   // About section
   rr += 2;
@@ -2353,7 +2340,6 @@ void ConsoleTUI::handleMouseEvent(int button, int col, int row, bool is_press) {
   // 4. Actions tab (activeTab == 5) mouse clicks
   if (activeTab == 5 && activeModal == ModalType::NONE && !commandMode) {
     int contentStart = 1;
-    int contentEnd = rows - 4;
     int leftW = cols * 2 / 3;
     
     // Check if click is in the action list area
@@ -2469,7 +2455,7 @@ void ConsoleTUI::updateAutoSuggest() {
   if (commandInput.empty()) return;
 
   std::vector<std::string> commands = {
-    "help", "quit", "reset", "spike", "tab ", "scenario ", "addtower ", "adddevice ", "beamforming ", "handovers "
+    "help", "quit", "reset", "spike", "tab ", "scenario ", "addtower ", "adddevice ", "beamforming ", "handovers ", "balance"
   };
 
   for (const auto &cmd : commands) {
@@ -2494,6 +2480,7 @@ void ConsoleTUI::executeCommand(const std::string &cmd) {
     Logger::info("          adddevice <gen> <name> <type> <tower_idx>");
     Logger::info("          beamforming <tower_idx> <factor>");
     Logger::info("          handovers <count>");
+    Logger::info("          balance");
   } else if (action == "quit") {
     quit = true;
   } else if (action == "reset") {
@@ -2593,6 +2580,9 @@ void ConsoleTUI::executeCommand(const std::string &cmd) {
     } else {
       Logger::error("Usage: handovers <count>");
     }
+  } else if (action == "balance") {
+    LoadBalancer lb(&simulator);
+    lb.balance_load();
   } else {
     Logger::error("Unknown command. Type 'help' for options.");
   }
@@ -2790,7 +2780,11 @@ void ConsoleTUI::updateMobility() {
 
 void ConsoleTUI::run() {
   setupTerminal();
-  
+  // The event-log panel renders Logger::get_logs() itself, so the
+  // background logging thread must stop echoing to stdout for the
+  // duration of the TUI session (see Utils.h consoleEcho comment).
+  Logger::set_console_echo(false);
+
   while (!quit) {
     int rows, cols;
     getTerminalSize(rows, cols);
@@ -2933,6 +2927,7 @@ void ConsoleTUI::run() {
       }
     }
   }
-  
+
+  Logger::set_console_echo(true);
   restoreTerminal();
 }

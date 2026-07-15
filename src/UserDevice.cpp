@@ -3,7 +3,7 @@
 #include "IOHelpers.h"
 
 // Initialize static member
-int UserDevice::device_counter = 0;
+std::atomic<int> UserDevice::device_counter{0};
 
 // UserDevice implementation
 UserDevice::UserDevice(const std::string &name, CommunicationType type)
@@ -122,7 +122,22 @@ Device3G::~Device3G() {}
 
 int Device3G::get_message_count() const
 {
-    return 10; // Always 10 messages for 3G
+    // CDMA unifies voice and data onto packet switching (see CDMAProtocol),
+    // so, unlike 2G's split circuit/packet paths, comm type here mainly
+    // changes how much payload a session pushes rather than which switching
+    // path it takes. Values are lower than 2G's DATA=5/VOICE=15/BOTH=20 to
+    // reflect CDMA's better channel efficiency per session.
+    switch (get_communication_type())
+    {
+    case CommunicationType::DATA:
+        return 8;
+    case CommunicationType::VOICE:
+        return 12;
+    case CommunicationType::BOTH:
+        return 18;
+    default:
+        return 0;
+    }
 }
 
 // Device4G implementation
@@ -133,7 +148,19 @@ Device4G::~Device4G() {}
 
 int Device4G::get_message_count() const
 {
-    return 10; // Always 10 messages for 4G
+    // OFDM's sub-channel structure and MIMO reuse (see OFDMProtocol) push
+    // per-session overhead down further than 3G's CDMA channels.
+    switch (get_communication_type())
+    {
+    case CommunicationType::DATA:
+        return 6;
+    case CommunicationType::VOICE:
+        return 10;
+    case CommunicationType::BOTH:
+        return 14;
+    default:
+        return 0;
+    }
 }
 
 // Device5G implementation
@@ -144,7 +171,19 @@ Device5G::~Device5G() {}
 
 int Device5G::get_message_count() const
 {
-    return 10; // Always 10 messages for 5G
+    // Massive MIMO's spatial multiplexing (see MassiveMIMOProtocol) is the
+    // most efficient of the four "conventional" generations modeled here.
+    switch (get_communication_type())
+    {
+    case CommunicationType::DATA:
+        return 4;
+    case CommunicationType::VOICE:
+        return 8;
+    case CommunicationType::BOTH:
+        return 10;
+    default:
+        return 0;
+    }
 }
 
 // Device6G implementation

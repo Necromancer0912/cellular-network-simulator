@@ -3,10 +3,15 @@ bin/
 obj/
 *.o
 *.d
+*.out
+*.exe
 
-# IDE files
+# Core dumps
+core
+*.core
+
+# IDE / editor files
 .vscode/
-trash/
 .idea/
 *.swp
 *.swo
@@ -16,23 +21,8 @@ trash/
 .DS_Store
 Thumbs.db
 
-# Backup files
+# Backup / temp files
 *.bak
-
-# Temporary files
 tmp/
 temp/
 *.tmp
-
-# Core dumps
-core
-*.core
-
-# Compiler output
-*.out
-*.exe
-*.txt
-md_trash/
-
-# Video files
-*.mov

@@ -4,6 +4,7 @@
 #include "CellularCore.h"
 #include "Protocol.h"
 #include "UserDevice.h"
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -23,7 +24,6 @@ struct FrequencyChannel {
 
   FrequencyChannel(int id, double start, double end, int max, int antenna = 0);
   bool is_full() const;
-  int get_available_slots() const;
 };
 
 /**
@@ -32,7 +32,7 @@ struct FrequencyChannel {
  */
 class CellTower {
 private:
-  static int tower_counter;
+  static std::atomic<int> tower_counter;
   int tower_id;
   std::string location;
   std::shared_ptr<Protocol> protocol;
@@ -40,6 +40,9 @@ private:
   std::vector<FrequencyChannel> channels;
   std::map<int, std::shared_ptr<UserDevice>>
       connected_devices; // device_id -> device
+  // Which core each connected device was registered to, so disconnect can
+  // release capacity on the right core instead of guessing.
+  std::map<int, std::shared_ptr<CellularCore>> device_core_map;
   double total_bandwidth_mhz;
   int max_supported_devices;
   double beamforming_multiplier;
@@ -65,10 +68,13 @@ public:
   int get_tower_id() const { return tower_id; }
   std::string get_location() const { return location; }
   int get_max_supported_devices() const { return max_supported_devices; }
-  int get_current_device_count() const { return connected_devices.size(); }
+  int get_current_device_count() const {
+    std::lock_guard<std::mutex> lock(tower_mutex);
+    return static_cast<int>(connected_devices.size());
+  }
   double get_total_bandwidth() const { return total_bandwidth_mhz; }
   std::shared_ptr<Protocol> get_protocol() const { return protocol; }
-  int get_number_of_cores() const { return cores.size(); }
+  int get_number_of_cores() const { return static_cast<int>(cores.size()); }
   const std::vector<std::shared_ptr<CellularCore>>& get_cores() const { return cores; }
   double get_x() const { return x; }
   double get_y() const { return y; }

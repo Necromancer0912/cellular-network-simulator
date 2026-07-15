@@ -18,6 +18,23 @@ int Protocol::calculate_total_channels(double total_bandwidth_mhz) const
     return static_cast<int>(totalBandwidthKHz / channel_bandwidth);
 }
 
+int Protocol::calculate_cores_from_messages(int totalUsers, int messages_per_user,
+                                            int core_message_capacity) const
+{
+    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
+    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
+        throw CapacityException("Integer overflow while calculating total messages");
+    }
+
+    long long overhead = (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
+    long long effectiveMessages = total_messages + overhead;
+    if (effectiveMessages < 0) {
+        throw CapacityException("Invalid effective message count (negative)");
+    }
+
+    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / core_message_capacity));
+}
+
 // TDMAProtocol implementation (2G)
 TDMAProtocol::TDMAProtocol()
     : Protocol("TDMA (2G)", 20, 200.0, 16) {}
@@ -38,20 +55,7 @@ int TDMAProtocol::calculate_messages_per_user() const
 
 int TDMAProtocol::calculate_required_cores(int totalUsers, int messages_per_user) const
 {
-    // Use 64-bit arithmetic and check for overflow
-    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
-    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
-        throw CapacityException("Integer overflow while calculating total messages");
-    }
-
-    long long overhead = (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
-    long long effectiveMessages = total_messages + overhead;
-    if (effectiveMessages < 0) {
-        throw CapacityException("Invalid effective message count (negative)");
-    }
-
-    // Assuming each core can handle 1000 messages
-    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / 1000.0));
+    return calculate_cores_from_messages(totalUsers, messages_per_user, 1000);
 }
 
 std::string TDMAProtocol::get_protocol_details() const
@@ -91,12 +95,7 @@ int CDMAProtocol::calculate_messages_per_user() const
 
 int CDMAProtocol::calculate_required_cores(int totalUsers, int messages_per_user) const
 {
-    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
-    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
-        throw CapacityException("Integer overflow while calculating total messages");
-    }
-    long long effectiveMessages = total_messages + (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
-    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / 1000.0));
+    return calculate_cores_from_messages(totalUsers, messages_per_user, 1000);
 }
 
 std::string CDMAProtocol::get_protocol_details() const
@@ -136,12 +135,7 @@ int OFDMProtocol::calculate_messages_per_user() const
 
 int OFDMProtocol::calculate_required_cores(int totalUsers, int messages_per_user) const
 {
-    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
-    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
-        throw CapacityException("Integer overflow while calculating total messages");
-    }
-    long long effectiveMessages = total_messages + (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
-    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / 1000.0));
+    return calculate_cores_from_messages(totalUsers, messages_per_user, 1000);
 }
 
 std::string OFDMProtocol::get_protocol_details() const
@@ -196,12 +190,7 @@ int MassiveMIMOProtocol::calculate_messages_per_user() const
 
 int MassiveMIMOProtocol::calculate_required_cores(int totalUsers, int messages_per_user) const
 {
-    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
-    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
-        throw CapacityException("Integer overflow while calculating total messages");
-    }
-    long long effectiveMessages = total_messages + (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
-    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / 1000.0));
+    return calculate_cores_from_messages(totalUsers, messages_per_user, 1000);
 }
 
 std::string MassiveMIMOProtocol::get_protocol_details() const
@@ -252,13 +241,8 @@ int TerahertzProtocol::calculate_messages_per_user() const
 
 int TerahertzProtocol::calculate_required_cores(int totalUsers, int messages_per_user) const
 {
-    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
-    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
-        throw CapacityException("Integer overflow while calculating total messages");
-    }
-    long long effectiveMessages = total_messages + (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
-    // AI-driven optimization reduces core requirements
-    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / 1500.0));
+    // AI-driven scheduling gives each core more effective message capacity.
+    return calculate_cores_from_messages(totalUsers, messages_per_user, 1500);
 }
 
 std::string TerahertzProtocol::get_protocol_details() const
@@ -312,13 +296,8 @@ int HolographicProtocol::calculate_messages_per_user() const
 
 int HolographicProtocol::calculate_required_cores(int totalUsers, int messages_per_user) const
 {
-    long long total_messages = static_cast<long long>(totalUsers) * static_cast<long long>(messages_per_user);
-    if (totalUsers > 0 && messages_per_user > 0 && total_messages / messages_per_user != totalUsers) {
-        throw CapacityException("Integer overflow while calculating total messages");
-    }
-    long long effectiveMessages = total_messages + (total_messages / 100) * static_cast<long long>(overhead_per_100_messages);
-    // Brain-interface and quantum computing reduces core requirements significantly
-    return static_cast<int>(std::ceil(static_cast<double>(effectiveMessages) / 2000.0));
+    // Brain-interface/quantum-assisted processing pushes core capacity further still.
+    return calculate_cores_from_messages(totalUsers, messages_per_user, 2000);
 }
 
 std::string HolographicProtocol::get_protocol_details() const

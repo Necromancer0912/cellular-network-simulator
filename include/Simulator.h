@@ -8,41 +8,78 @@
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 /**
- * Template class for managing collections of network elements
+ * Template class for managing collections of network elements.
+ *
+ * Simulator hands this out to worker threads via generate_network_parallel
+ * and connect_devices_async, so add()/get()/size() are called concurrently
+ * from multiple threads during a parallel device-connect batch. An earlier
+ * version was a plain vector wrapper with no locking, which meant concurrent
+ * add() calls could race on a reallocation. The mutex below is what actually
+ * makes this collection safe to share across threads, rather than just a
+ * template-usage box to check.
  */
 template <typename T> class NetworkCollection {
 private:
+  mutable std::mutex collection_mutex;
   std::vector<std::shared_ptr<T>> elements;
   std::string collection_name;
 
 public:
   NetworkCollection(const std::string &name) : collection_name(name) {}
 
-  void add(std::shared_ptr<T> element) { elements.push_back(element); }
+  void add(std::shared_ptr<T> element) {
+    std::lock_guard<std::mutex> lock(collection_mutex);
+    elements.push_back(element);
+  }
+
+  // Inserts a whole batch under a single lock acquisition. Prefer this over
+  // repeated add() calls when a caller (e.g. a parallel provisioning task)
+  // builds up a local batch of elements before publishing them - one lock
+  // per batch instead of one lock per element removes most of the mutex
+  // contention when several threads are each producing many elements at
+  // once, without changing the fact that every element is still guarded by
+  // the same mutex while it's actually inserted.
+  void add_batch(const std::vector<std::shared_ptr<T>> &batch) {
+    if (batch.empty()) return;
+    std::lock_guard<std::mutex> lock(collection_mutex);
+    elements.insert(elements.end(), batch.begin(), batch.end());
+  }
 
   void remove(int index) {
-    if (index >= 0 && index < elements.size()) {
+    std::lock_guard<std::mutex> lock(collection_mutex);
+    if (index >= 0 && static_cast<size_t>(index) < elements.size()) {
       elements.erase(elements.begin() + index);
     }
   }
 
   std::shared_ptr<T> get(int index) const {
+    std::lock_guard<std::mutex> lock(collection_mutex);
     if (index >= 0 && static_cast<size_t>(index) < elements.size()) {
       return elements[index];
     }
     return nullptr;
   }
 
-  int size() const { return elements.size(); }
+  int size() const {
+    std::lock_guard<std::mutex> lock(collection_mutex);
+    return static_cast<int>(elements.size());
+  }
 
-  std::vector<std::shared_ptr<T>> get_all() const { return elements; }
+  std::vector<std::shared_ptr<T>> get_all() const {
+    std::lock_guard<std::mutex> lock(collection_mutex);
+    return elements;
+  }
 
-  void clear() { elements.clear(); }
+  void clear() {
+    std::lock_guard<std::mutex> lock(collection_mutex);
+    elements.clear();
+  }
 
   std::string get_name() const { return collection_name; }
 };
@@ -100,6 +137,16 @@ private:
   std::shared_ptr<UserDevice> create_device(const std::string &generation,
                                             const std::string &name,
                                             CommunicationType type);
+  // Same connection logic as create_and_connect_device, but does not touch
+  // the shared `devices` collection - the caller owns publishing the
+  // returned device (individually via devices.add(), or in bulk via
+  // devices.add_batch()). Used by run_threading_benchmark's parallel run so
+  // several worker threads doing this concurrently only take the `devices`
+  // lock once per batch instead of once per device; see the comment there
+  // for why that distinction turned out to matter.
+  std::shared_ptr<UserDevice> connect_device_deferred_registration(
+      const std::string &generation, const std::string &name,
+      CommunicationType type, int towerIndex);
 
 public:
   // Constructor and destructor
@@ -153,19 +200,12 @@ public:
   void analyze7G() const;
   
   // Advanced Features
-  void run_threading_benchmark();
-  // Headless benchmark variant: devices, thread count (0 = auto), csv output path (optional)
+  // devices: how many to provision; threads: worker count (0 = auto-detect
+  // hardware_concurrency); csvPath: optional file to append machine-readable
+  // results to. See src/Simulator.cpp for what this actually measures.
   void run_threading_benchmark(int devices, int threads, const std::string &csvPath = "");
 
-  // Enhanced benchmark modes
-  enum class BenchmarkMode { MINIMAL = 0, GOOD = 1, WILD = 2 };
-  void run_threading_benchmark(BenchmarkMode mode, int devices, int threads, const std::string &csvPath = "");
 
-  // Live monitor
-  void start_live_monitor(int interval_seconds = 5);
-  void stop_live_monitor();
-  bool is_monitor_running() const;
-  
   // Beamforming control
   void apply_beamforming_to_tower(int towerIndex, double factor);
   void disable_beamforming_on_tower(int towerIndex);

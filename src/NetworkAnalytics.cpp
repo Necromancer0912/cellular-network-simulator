@@ -344,6 +344,110 @@ QoSLevel LoadBalancer::get_device_qos(int device_id) const {
   return (it != device_qos.end()) ? it->second : QoSLevel::MEDIUM;
 }
 
+QoSLevel LoadBalancer::effective_qos(const std::shared_ptr<UserDevice> &device) const {
+  if (!device) return QoSLevel::MEDIUM;
+  auto it = device_qos.find(device->get_device_id());
+  if (it != device_qos.end()) return it->second;
+
+  switch (device->get_communication_type()) {
+    case CommunicationType::VOICE: return QoSLevel::HIGH;
+    case CommunicationType::BOTH:  return QoSLevel::MEDIUM;
+    case CommunicationType::DATA:  return QoSLevel::LOW;
+    default: return QoSLevel::MEDIUM;
+  }
+}
+
+int LoadBalancer::find_best_tower(QoSLevel qos) const {
+  int best = -1;
+  double bestScore = -1.0;
+
+  for (int i = 0; i < simulator->get_tower_count(); i++) {
+    auto tower = simulator->get_tower(i);
+    if (!tower) continue;
+    if (tower->get_current_device_count() >= tower->get_max_supported_devices()) continue; // full
+
+    double util = tower->get_utilization();
+    double score;
+    if (qos == QoSLevel::CRITICAL || qos == QoSLevel::HIGH) {
+      // High-priority traffic goes wherever has the most headroom.
+      score = 100.0 - util;
+    } else {
+      // Lower-priority traffic fills towers already in reasonable use
+      // (target ~70%) instead of consuming the best-available tower,
+      // leaving headroom on lightly loaded towers for HIGH/CRITICAL
+      // devices that connect later.
+      if (util > 85.0) continue;
+      score = 100.0 - std::abs(70.0 - util);
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = i;
+    }
+  }
+  return best;
+}
+
+void LoadBalancer::redistribute_devices() {
+  const double OVERLOAD_THRESHOLD = 85.0;
+  const double MIN_IMPROVEMENT = 15.0; // only hand over if meaningfully better off
+
+  int moved = 0;
+  for (int t = 0; t < simulator->get_tower_count(); ++t) {
+    auto tower = simulator->get_tower(t);
+    if (!tower || tower->get_utilization() < OVERLOAD_THRESHOLD) continue;
+
+    // Snapshot the device list before mutating the tower mid-iteration.
+    auto devicesOnTower = tower->get_all_devices();
+    for (auto &device : devicesOnTower) {
+      if (!device) continue;
+      QoSLevel qos = effective_qos(device);
+      if (qos == QoSLevel::CRITICAL) continue; // never migrate critical sessions
+
+      int targetIdx = find_best_tower(qos);
+      if (targetIdx < 0 || targetIdx == t) continue;
+
+      auto target = simulator->get_tower(targetIdx);
+      if (!target) continue;
+      if (tower->get_utilization() - target->get_utilization() < MIN_IMPROVEMENT) continue;
+
+      int deviceId = device->get_device_id();
+      if (target->connect_device(device)) {
+        tower->disconnect_device(deviceId);
+        moved++;
+        Logger::info("Load balancer moved device " + std::to_string(deviceId) +
+                     " from Tower #" + std::to_string(t) + " to Tower #" + std::to_string(targetIdx));
+      }
+    }
+  }
+
+  if (moved > 0) {
+    Logger::success("Load balancer redistributed " + std::to_string(moved) + " device(s) off overloaded towers.");
+  } else {
+    Logger::info("Load balancer found no overloaded towers to redistribute.");
+  }
+}
+
+void LoadBalancer::balance_load() {
+  double peakBefore = 0.0;
+  for (int i = 0; i < simulator->get_tower_count(); ++i) {
+    auto tower = simulator->get_tower(i);
+    if (tower) peakBefore = std::max(peakBefore, tower->get_utilization());
+  }
+
+  redistribute_devices();
+
+  double peakAfter = 0.0;
+  for (int i = 0; i < simulator->get_tower_count(); ++i) {
+    auto tower = simulator->get_tower(i);
+    if (tower) peakAfter = std::max(peakAfter, tower->get_utilization());
+  }
+
+  std::stringstream ss;
+  ss << "Peak tower utilization: " << std::fixed << std::setprecision(1)
+     << peakBefore << "% -> " << peakAfter << "%";
+  Logger::info(ss.str());
+}
+
 int LoadBalancer::find_least_loaded_tower() const {
   int bestTower = -1;
   double minUtil = 100.0;
