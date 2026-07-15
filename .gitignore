@@ -26,3 +26,7 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Interview prep material - personal, not for the repo
+INTERVIEW_PREP.pdf
+INTERVIEW_PREP.md
